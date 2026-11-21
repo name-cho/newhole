@@ -1,22 +1,33 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
+	"time"
 
 	auth "github.com/abbot/go-http-auth"
-	lm "github.com/loophole/cli/internal/app/loophole/models"
-	"github.com/loophole/cli/internal/pkg/urlmaker"
+	lm "github.com/name-cho/newhole/internal/app/newhole/models"
+	"github.com/name-cho/newhole/internal/pkg/communication"
+	"github.com/name-cho/newhole/internal/pkg/urlmaker"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/webdav"
 )
 
+const logoURL = "https://raw.githubusercontent.com/name-cho/newhole/main/docs/logo.png"
+
 const (
-	logoURL = "https://raw.githubusercontent.com/loophole/website/master/static/img/logo.png"
+	DefaultMaxHeaderBytes = 1 << 20
+	DefaultMaxRequestBody = 1 << 30
+	DefaultReadTimeout    = 0
+	DefaultIdleTimeout    = 120 * time.Second
 )
 
 type ServerBuilder interface {
@@ -26,16 +37,20 @@ type ServerBuilder interface {
 	Proxy() ProxyServerBuilder
 	ServeStatic() StaticServerBuilder
 	ServeWebdav() WebdavServerBuilder
+	WithRemoteSpecs(lm.RemoteEndpointSpecs) ServerBuilder
+	EnableDirectoryListing() ServerBuilder
 }
 
 type serverBuilder struct {
 	siteID            string
 	domain            string
 	disableOldCiphers bool
+	specs             lm.RemoteEndpointSpecs
+	directoryListing  bool
 }
 
 func (sb *serverBuilder) WithSiteID(siteID string) ServerBuilder {
-	sb.siteID = siteID
+	sb.siteID = strings.ToLower(siteID)
 	return sb
 }
 
@@ -43,36 +58,43 @@ func (sb *serverBuilder) WithDomain(domain string) ServerBuilder {
 	sb.domain = domain
 	return sb
 }
+
 func (sb *serverBuilder) DisableOldCiphers(setting bool) ServerBuilder {
 	sb.disableOldCiphers = setting
 	return sb
 }
 
+func (sb *serverBuilder) WithRemoteSpecs(specs lm.RemoteEndpointSpecs) ServerBuilder {
+	sb.specs = specs
+	return sb
+}
+
+func (sb *serverBuilder) EnableDirectoryListing() ServerBuilder {
+	sb.directoryListing = true
+	return sb
+}
+
 func (sb *serverBuilder) Proxy() ProxyServerBuilder {
-	return &proxyServerBuilder{
-		serverBuilder: sb,
-	}
+	return &proxyServerBuilder{serverBuilder: sb}
 }
 
 func (sb *serverBuilder) ServeStatic() StaticServerBuilder {
-	return &staticServerBuilder{
-		serverBuilder: sb,
-	}
-}
-func (sb *serverBuilder) ServeWebdav() WebdavServerBuilder {
-	return &webdavServerBuilder{
-		serverBuilder: sb,
-	}
+	return &staticServerBuilder{serverBuilder: sb}
 }
 
-// ProxyServerBuilder is used to proxy to already running server
+func (sb *serverBuilder) ServeWebdav() WebdavServerBuilder {
+	return &webdavServerBuilder{serverBuilder: sb}
+}
+
 type ProxyServerBuilder interface {
 	ToEndpoint(lm.Endpoint) ProxyServerBuilder
 	WithBasicAuth(string, string) ProxyServerBuilder
 	DisableProxyErrorPage() ProxyServerBuilder
 	EnableInsecureHTTPSBackend() ProxyServerBuilder
+	WithDialer(func() (net.Conn, error)) ProxyServerBuilder
 	Build() (*http.Server, error)
 }
+
 type proxyServerBuilder struct {
 	serverBuilder         *serverBuilder
 	endpoint              lm.Endpoint
@@ -81,6 +103,7 @@ type proxyServerBuilder struct {
 	basicAuthPassword     string
 	disableProxyErrorPage bool
 	disableCertCheck      bool
+	dialer                func() (net.Conn, error)
 }
 
 func (psb *proxyServerBuilder) ToEndpoint(endpoint lm.Endpoint) ProxyServerBuilder {
@@ -89,7 +112,7 @@ func (psb *proxyServerBuilder) ToEndpoint(endpoint lm.Endpoint) ProxyServerBuild
 }
 
 func (psb *proxyServerBuilder) WithBasicAuth(username string, password string) ProxyServerBuilder {
-	psb.basicAuthEnabled = true
+	psb.basicAuthEnabled = username != "" || password != ""
 	psb.basicAuthUsername = username
 	psb.basicAuthPassword = password
 	return psb
@@ -105,72 +128,85 @@ func (psb *proxyServerBuilder) EnableInsecureHTTPSBackend() ProxyServerBuilder {
 	return psb
 }
 
+func (psb *proxyServerBuilder) WithDialer(dialer func() (net.Conn, error)) ProxyServerBuilder {
+	psb.dialer = dialer
+	return psb
+}
+
 func (psb *proxyServerBuilder) Build() (*http.Server, error) {
+	scheme := psb.endpoint.Protocol
+	if scheme == "" {
+		scheme = "http"
+	}
+
 	target := &url.URL{
-		Scheme: psb.endpoint.Protocol,
+		Scheme: scheme,
 		Host:   psb.endpoint.Hostname(),
 	}
 	if psb.endpoint.Path != "" {
 		target.Path = psb.endpoint.Path
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	specs := psb.serverBuilder.specs
+	publicHost := ""
+	if psb.serverBuilder.domain != "" {
+		publicHost = urlmaker.GetSiteFQDN(psb.serverBuilder.siteID, psb.serverBuilder.domain)
+	}
+	proxy := newReverseProxy(target, specs, publicHost)
 
-	defaultDirector := proxy.Director
-
-	proxy.Director = func(req *http.Request) {
-		defaultDirector(req)
-
-		addr := net.ParseIP(target.Host)
-		if addr == nil {
-			req.Host = target.Host
-		}
-
-		req.Header.Set("X-Forwarded-Host", urlmaker.GetSiteFQDN(psb.serverBuilder.siteID, psb.serverBuilder.domain))
-		req.Header.Set("X-Forwarded-Proto", "https")
+	proxy.Transport = &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialContext(psb.dialer, target, specs),
+		MaxIdleConns:          128,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: 0,
+		DisableKeepAlives:     false,
+		ForceAttemptHTTP2:     false,
+	}
+	if psb.disableCertCheck {
+		proxy.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
 
 	if !psb.disableProxyErrorPage {
 		proxy.ErrorHandler = proxyErrorHandler
 	}
 
-	if psb.disableCertCheck {
-		proxy.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-	}
-
-	var server *http.Server
-
+	handler := http.Handler(proxy)
+	handler = withRequestSanitizer(handler, specs)
 	if psb.basicAuthEnabled {
-		proxyWithAuth, err := getBasicAuthHandler(psb.serverBuilder.siteID, psb.serverBuilder.domain, psb.basicAuthUsername, psb.basicAuthPassword, proxy.ServeHTTP)
+		authHandler, err := getBasicAuthHandler(psb.serverBuilder.siteID, psb.serverBuilder.domain, psb.basicAuthUsername, psb.basicAuthPassword, handler)
 		if err != nil {
 			return nil, err
 		}
-
-		server = &http.Server{
-			Handler:   proxyWithAuth,
-			TLSConfig: getTLSConfig(psb.serverBuilder.siteID, psb.serverBuilder.domain, psb.serverBuilder.disableOldCiphers),
-		}
-	} else {
-		server = &http.Server{
-			Handler:   proxy,
-			TLSConfig: getTLSConfig(psb.serverBuilder.siteID, psb.serverBuilder.domain, psb.serverBuilder.disableOldCiphers),
-		}
+		handler = authHandler
 	}
 
-	return server, nil
+	return newServer(handler, psb.serverBuilder.siteID, psb.serverBuilder.domain, psb.serverBuilder.disableOldCiphers, specs), nil
 }
 
-// StaticServerBuilder is used to create server which expose local directory
+func dialContext(dialer func() (net.Conn, error), target *url.URL, specs lm.RemoteEndpointSpecs) func(ctx context.Context, network string, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		if dialer == nil {
+			return (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
+		}
+		return dialer()
+	}
+}
+
 type StaticServerBuilder interface {
 	FromDirectory(string) StaticServerBuilder
 	WithBasicAuth(string, string) StaticServerBuilder
+	WithDirectoryListing(bool) StaticServerBuilder
 	Build() (*http.Server, error)
 }
+
 type staticServerBuilder struct {
 	serverBuilder     *serverBuilder
 	directory         string
+	directoryListing  bool
 	basicAuthEnabled  bool
 	basicAuthUsername string
 	basicAuthPassword string
@@ -182,43 +218,38 @@ func (ssb *staticServerBuilder) FromDirectory(directory string) StaticServerBuil
 }
 
 func (ssb *staticServerBuilder) WithBasicAuth(username string, password string) StaticServerBuilder {
-	ssb.basicAuthEnabled = true
+	ssb.basicAuthEnabled = username != "" || password != ""
 	ssb.basicAuthUsername = username
 	ssb.basicAuthPassword = password
 	return ssb
 }
 
+func (ssb *staticServerBuilder) WithDirectoryListing(enabled bool) StaticServerBuilder {
+	ssb.directoryListing = enabled
+	return ssb
+}
+
 func (ssb *staticServerBuilder) Build() (*http.Server, error) {
-	fs := http.FileServer(http.Dir(ssb.directory))
+	fileServer := newStaticHandler(ssb.directory, ssb.directoryListing)
 
-	var server *http.Server
-
+	var handler http.Handler = fileServer
 	if ssb.basicAuthEnabled {
-		handler, err := getBasicAuthHandler(ssb.serverBuilder.siteID, ssb.serverBuilder.domain, ssb.basicAuthUsername, ssb.basicAuthPassword, fs.ServeHTTP)
+		authHandler, err := getBasicAuthHandler(ssb.serverBuilder.siteID, ssb.serverBuilder.domain, ssb.basicAuthUsername, ssb.basicAuthPassword, handler)
 		if err != nil {
 			return nil, err
 		}
-
-		server = &http.Server{
-			Handler:   handler,
-			TLSConfig: getTLSConfig(ssb.serverBuilder.siteID, ssb.serverBuilder.domain, ssb.serverBuilder.disableOldCiphers),
-		}
-	} else {
-		server = &http.Server{
-			Handler:   fs,
-			TLSConfig: getTLSConfig(ssb.serverBuilder.siteID, ssb.serverBuilder.domain, ssb.serverBuilder.disableOldCiphers),
-		}
+		handler = authHandler
 	}
 
-	return server, nil
+	return newServer(handler, ssb.serverBuilder.siteID, ssb.serverBuilder.domain, ssb.serverBuilder.disableOldCiphers, ssb.serverBuilder.specs), nil
 }
 
-// WebdavServerBuilder is used to create server which expose local directory
 type WebdavServerBuilder interface {
 	FromDirectory(string) WebdavServerBuilder
 	WithBasicAuth(string, string) WebdavServerBuilder
 	Build() (*http.Server, error)
 }
+
 type webdavServerBuilder struct {
 	serverBuilder     *serverBuilder
 	directory         string
@@ -233,67 +264,177 @@ func (wsb *webdavServerBuilder) FromDirectory(directory string) WebdavServerBuil
 }
 
 func (wsb *webdavServerBuilder) WithBasicAuth(username string, password string) WebdavServerBuilder {
-	wsb.basicAuthEnabled = true
+	wsb.basicAuthEnabled = username != "" || password != ""
 	wsb.basicAuthUsername = username
 	wsb.basicAuthPassword = password
 	return wsb
 }
 
 func (wsb *webdavServerBuilder) Build() (*http.Server, error) {
-	wdHandler := &webdav.Handler{
+	handler := &webdav.Handler{
 		Prefix:     "/",
 		FileSystem: webdav.Dir(wsb.directory),
 		LockSystem: webdav.NewMemLS(),
 	}
 
-	var server *http.Server
-
+	var final http.Handler = handler
 	if wsb.basicAuthEnabled {
-		handler, err := getBasicAuthHandler(wsb.serverBuilder.siteID, wsb.serverBuilder.domain, wsb.basicAuthUsername, wsb.basicAuthPassword, wdHandler.ServeHTTP)
+		authHandler, err := getBasicAuthHandler(wsb.serverBuilder.siteID, wsb.serverBuilder.domain, wsb.basicAuthUsername, wsb.basicAuthPassword, final)
 		if err != nil {
 			return nil, err
 		}
-
-		server = &http.Server{
-			Handler:   handler,
-			TLSConfig: getTLSConfig(wsb.serverBuilder.siteID, wsb.serverBuilder.domain, wsb.serverBuilder.disableOldCiphers),
-		}
-	} else {
-		server = &http.Server{
-			Handler:   wdHandler,
-			TLSConfig: getTLSConfig(wsb.serverBuilder.siteID, wsb.serverBuilder.domain, wsb.serverBuilder.disableOldCiphers),
-		}
+		final = authHandler
 	}
 
-	return server, nil
+	return newServer(final, wsb.serverBuilder.siteID, wsb.serverBuilder.domain, wsb.serverBuilder.disableOldCiphers, wsb.serverBuilder.specs), nil
 }
 
-// New starts creation of new server
 func New() ServerBuilder {
 	return &serverBuilder{}
 }
 
-func getBasicAuthHandler(siteID string, domain string, username string, password string, handler http.HandlerFunc) (http.HandlerFunc, error) {
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, err
+func newServer(handler http.Handler, siteID string, domain string, disableOldCiphers bool, specs lm.RemoteEndpointSpecs) *http.Server {
+	maxHeaderBytes := specs.MaxHeaderBytes
+	if maxHeaderBytes <= 0 {
+		maxHeaderBytes = DefaultMaxHeaderBytes
 	}
-
-	secret := getBasicAuthSecretParser(username, string(hashedPassword))
-
-	authenticator := auth.NewBasicAuthenticator(urlmaker.GetSiteFQDN(siteID, domain), secret)
-	return auth.JustCheck(authenticator, handler), nil
+	return &http.Server{
+		Handler:           handler,
+		TLSConfig:         getTLSConfig(siteID, domain, disableOldCiphers),
+		MaxHeaderBytes:    maxHeaderBytes,
+		IdleTimeout:       DefaultIdleTimeout,
+		ErrorLog:          tunnelErrorLog(),
+		ReadHeaderTimeout: 30 * time.Second,
+	}
 }
 
-func getBasicAuthSecretParser(username string, hashedPassword string) auth.SecretProvider {
-	return func(user string, realm string) string {
+func getBasicAuthHandler(siteID string, domain string, username string, password string, handler http.Handler) (http.Handler, error) {
+	if username == "" || password == "" {
+		return nil, errors.New("basic auth requires both a username and a password")
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("unable to hash the basic auth password: %w", err)
+	}
+
+	secret := func(user string, realm string) string {
 		if user == username {
-			return hashedPassword
+			return string(hashedPassword)
 		}
 		return ""
 	}
+
+	authenticator := auth.NewBasicAuthenticator(urlmaker.GetSiteFQDN(siteID, domain), secret)
+	wrapped := auth.JustCheck(authenticator, func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	})
+	return http.HandlerFunc(wrapped), nil
 }
 
 func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
-	w.Write([]byte(fmt.Sprintf(proxyErrorTemplate, logoURL, err.Error())))
+	message := err.Error()
+	if isClientDisconnect(err) {
+		communication.TunnelDebug("", "the client closed the connection before the response was complete")
+		return
+	}
+	if r.Context().Err() != nil {
+		return
+	}
+	communication.TunnelWarn("", "the local service could not be reached: "+message)
+	w.WriteHeader(http.StatusBadGateway)
+	fmt.Fprintf(w, proxyErrorTemplate, logoURL, htmlEscape(message))
+}
+
+func isClientDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"context canceled",
+		"broken pipe",
+		"connection reset by peer",
+		"client disconnected",
+		"use of closed network connection",
+		"unexpected eof",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func htmlEscape(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
+	return replacer.Replace(value)
+}
+
+func newReverseProxy(target *url.URL, specs lm.RemoteEndpointSpecs, publicHost string) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Director = nil
+	proxy.Rewrite = func(request *httputil.ProxyRequest) {
+		originalHost := request.In.Host
+		remoteIP := clientIP(request.In)
+
+		request.SetURL(target)
+		request.Out.Header.Del("Forwarded")
+		request.Out.Header.Del("X-Forwarded-For")
+		request.Out.Header.Del("X-Real-Ip")
+		request.SetXForwarded()
+
+		if remoteIP != "" {
+			forwardedFor := firstNonEmpty(specs.ForwardedForHeader, "X-Forwarded-For")
+			request.Out.Header.Set(forwardedFor, remoteIP)
+			if realIP := specs.RealIPHeader; realIP != "" {
+				request.Out.Header.Set(realIP, remoteIP)
+			}
+		}
+
+		if specs.Compress {
+			negotiateCompression(request)
+		}
+
+		switch {
+		case specs.OverrideHostHeader != "":
+			request.Out.Host = specs.OverrideHostHeader
+		case specs.PreserveHostHeader:
+			request.Out.Host = originalHost
+		case publicHost != "":
+			request.Out.Host = publicHost
+		default:
+			request.Out.Host = originalHost
+		}
+	}
+
+	proxy.FlushInterval = 100 * time.Millisecond
+	return proxy
+}
+
+func negotiateCompression(request *httputil.ProxyRequest) {
+	accepted := strings.ToLower(request.In.Header.Get("Accept-Encoding"))
+	if !strings.Contains(accepted, "gzip") || strings.Contains(accepted, "br") {
+		return
+	}
+	request.Out.Header.Set("Accept-Encoding", "gzip")
+}
+
+func clientIP(req *http.Request) string {
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return req.RemoteAddr
+	}
+	return host
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

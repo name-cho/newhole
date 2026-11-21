@@ -16,7 +16,7 @@ const FeedbackPage = (): JSX.Element => {
             Our feedback form is available as Google Form and can be accessed by
             using the link:
             <OpenCopyBlock target={appState.feedbackFormUrl} />
-            Please share your thoughs on <em>Loophole</em> there.
+            Please share your thoughs on <em>Newhole</em> there.
           </div>
         ) : (
           <div>

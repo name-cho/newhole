@@ -1,3 +1,4 @@
+//go:build !desktop
 // +build !desktop
 
 package cmd
@@ -10,25 +11,20 @@ import (
 	"github.com/spf13/cobra/doc"
 )
 
-// docsCommand represents the completion command
 var docsCommand = &cobra.Command{
-	Use:   "docs",
-	Short: "Generates docs",
-	Long: `Generates docs for existing loophole commands and saves them in './docs'.
-
-Mainly for developers.`,
+	Use:    "docs",
+	Short:  "Generate command documentation",
 	Hidden: true,
-	Run: func(cmd *cobra.Command, args []string) {
-		docsPath := "./docs"
-		if _, err := os.Stat(docsPath); os.IsNotExist(err) {
-			os.Mkdir(docsPath, os.ModePerm)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		directory := "./docs"
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			return err
 		}
-		err := doc.GenMarkdownTree(rootCmd, docsPath)
-		if err != nil {
-			fmt.Printf("Failed to generate docs: %v\n", err)
-			os.Exit(1)
+		if err := doc.GenMarkdownTree(rootCmd, directory); err != nil {
+			return fmt.Errorf("unable to generate docs: %w", err)
 		}
-		fmt.Printf("Docs succesfully generated in %s\n", docsPath)
+		fmt.Printf("documentation generated in %s\n", directory)
+		return nil
 	},
 }
 

@@ -1,62 +1,67 @@
 package cache
 
 import (
-	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
-
-	"github.com/mitchellh/go-homedir"
 )
 
 func TestGetLocalStorageDirReturnsCorrectPath(t *testing.T) {
-	home, err := homedir.Dir()
-	if err != nil {
-		t.Fatal(err)
+	root := t.TempDir()
+	t.Setenv("NEWHOLE_HOME", root)
+	directory := GetLocalStorageDir("expected-dirname")
+	expected := filepath.Join(root, "expected-dirname")
+	if directory != expected {
+		t.Fatalf("created directory %q differs from expected %q", directory, expected)
 	}
-	dirname := "expected-dirname"
-	expectedPath := fmt.Sprintf("%s/.loophole/%s", home, dirname)
-	createdDir := GetLocalStorageDir(dirname)
-
-	if expectedPath != createdDir {
-		t.Fatalf("Created directory path '%s' is different than expected: '%s'", createdDir, expectedPath)
-	}
-
 }
 
 func TestGetLocalStorageDirCreatesDirectory(t *testing.T) {
-	dirname := "expected-dirname"
-	createdDir := GetLocalStorageDir(dirname)
-
-	info, err := os.Stat(createdDir)
-	if os.IsNotExist(err) {
-		t.Fatalf("Directory '%s' doesn't exist", createdDir)
+	t.Setenv("NEWHOLE_HOME", t.TempDir())
+	created := GetLocalStorageDir("expected-dirname")
+	info, err := os.Stat(created)
+	if err != nil {
+		t.Fatalf("directory %q does not exist: %v", created, err)
 	}
 	if !info.IsDir() {
-		t.Fatalf("Path '%s' doesn't point to directory", createdDir)
+		t.Fatalf("path %q is not a directory", created)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("directory permissions %v differ from 0700", info.Mode().Perm())
 	}
 }
 
 func TestGetLocalStorageFileReturnsCorrectPath(t *testing.T) {
-	home, err := homedir.Dir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	filename := "expected-filename"
-
-	expectedPath := fmt.Sprintf("%s/.loophole/%s", home, filename)
-	filePath := GetLocalStorageFile(filename, "")
-
-	if expectedPath != filePath {
-		t.Fatalf("Created directory path '%s' is different than expected: '%s'", filePath, expectedPath)
+	root := t.TempDir()
+	t.Setenv("NEWHOLE_HOME", root)
+	filePath := GetLocalStorageFile("expected-filename", "")
+	expected := filepath.Join(root, "expected-filename")
+	if filePath != expected {
+		t.Fatalf("file path %q differs from expected %q", filePath, expected)
 	}
 }
 
-func TestGetLocalStorageDirDoesntCreateFile(t *testing.T) {
-	filename := "expected-filename"
-	filePath := GetLocalStorageFile(filename, "")
+func TestGetLocalStorageFileDoesNotCreateFile(t *testing.T) {
+	t.Setenv("NEWHOLE_HOME", t.TempDir())
+	filePath := GetLocalStorageFile("expected-filename", "")
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("expected file %q not to exist", filePath)
+	}
+}
 
-	_, err := os.Stat(filePath)
-	if !os.IsNotExist(err) {
-		t.Fatalf("Error while executing stat on '%s'", filePath)
+func TestLegacyStorageIsMigrated(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("NEWHOLE_HOME", "")
+	legacy := filepath.Join(home, legacyStorageDirectoryName)
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "tokens.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated := GetLocalStorageFile("tokens.json", "")
+	if _, err := os.Stat(migrated); err != nil {
+		t.Fatalf("tokens were not migrated: %v", err)
 	}
 }

@@ -1,46 +1,41 @@
+//go:build !desktop
 // +build !desktop
 
 package cmd
 
 import (
-	"fmt"
-	"os"
+	"errors"
 
-	"github.com/loophole/cli/internal/pkg/communication"
-	"github.com/loophole/cli/internal/pkg/token"
+	"github.com/name-cho/newhole/internal/pkg/communication"
+	"github.com/name-cho/newhole/internal/pkg/token"
 	"github.com/spf13/cobra"
 )
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
-	Short: "Log in to use your account",
-	Long: `Loophole service requires authentication, this command allows you to log in or set up one
-in case you don't yet have it.
-
-Running this command as not logged in user will prompt you to open URL and use the browser to verify your identity.
-
-Running this command as logged in user will fail, in cae you want to relogin then you need to log out first`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Short: "Log in to your account",
+	Long: `Newhole requires authentication. This command starts the device authorisation flow:
+open the printed URL, enter the printed code and the credentials are stored locally.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if token.IsTokenSaved() {
-			communication.LoginFailure(fmt.Errorf("Already logged in, please use `%s account logout` first to re-login", os.Args[0]))
+			return errors.New("already logged in, run `newhole account logout` first")
 		}
 
 		deviceCodeSpec, err := token.RegisterDevice()
 		if err != nil {
-			communication.LoginFailure(fmt.Errorf("Error obtaining device code: %s", err.Error()))
+			return err
 		}
 		communication.LoginStart(*deviceCodeSpec)
-		quitChannel := make(chan bool)
-		tokens, err := token.PollForToken(deviceCodeSpec.DeviceCode, deviceCodeSpec.Interval, quitChannel)
-		if err != nil {
-			communication.LoginFailure(fmt.Errorf("Error obtaining token: %s", err.Error()))
-		}
-		err = token.SaveToken(tokens)
-		if err != nil {
-			communication.LoginFailure(fmt.Errorf("Error saving token: %s", err.Error()))
 
+		tokens, err := token.PollForToken(deviceCodeSpec.DeviceCode, deviceCodeSpec.Interval, make(chan bool))
+		if err != nil {
+			return err
+		}
+		if err := token.SaveToken(tokens); err != nil {
+			return err
 		}
 		communication.LoginSuccess(tokens.IDToken)
+		return nil
 	},
 }
 

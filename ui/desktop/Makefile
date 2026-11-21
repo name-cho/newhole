@@ -28,13 +28,8 @@
 #   OSX users will have to install bash-completion
 #   (http://davidalger.com/development/bash-completion-on-os-x-with-brew/)
 
-ifeq ($(shell test -e ./yarn.lock && echo -n yes),yes)
-	RUNNER=yarn
-	INSTALLER=yarn install
-else
-	RUNNER=npm run
-	INSTALLER=npm install
-endif
+RUNNER=npm run
+INSTALLER=npm install --no-audit --no-fund
 
 define npm_script_targets
 TARGETS := $(shell \

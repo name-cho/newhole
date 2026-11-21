@@ -1,10 +1,11 @@
+//go:build !desktop
 // +build !desktop
 
 package main
 
 import (
-	"github.com/loophole/cli/cmd"
-	"github.com/loophole/cli/config"
+	"github.com/name-cho/newhole/cmd"
+	"github.com/name-cho/newhole/config"
 )
 
 var (

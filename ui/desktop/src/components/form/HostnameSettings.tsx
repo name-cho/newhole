@@ -1,6 +1,21 @@
 import React from "react";
 import classNames from "classnames";
-import { isLoopholeHostnameValid } from "../../features/validator/validators";
+import { useDispatch, useSelector } from "react-redux";
+import { send } from "@giantmachines/redux-websocket";
+import { isNewholeHostnameValid } from "../../features/validator/validators";
+import {
+  MessageTypeRequestHostnameForget,
+  MessageTypeRequestHostnameHistory,
+} from "../../constants/websocket";
+
+interface HostnameRecord {
+  hostname: string;
+  domain: string;
+  firstUsed: string;
+  lastUsed: string;
+  uses: number;
+  exposeMode: string;
+}
 
 interface BasicAuthSettingsProps {
   usingValue: boolean;
@@ -10,13 +25,17 @@ interface BasicAuthSettingsProps {
 }
 
 const HostnameSettings = (props: BasicAuthSettingsProps): JSX.Element => {
+  const dispatch = useDispatch();
+  const hostnames: HostnameRecord[] = useSelector(
+    (state: any) => state.config.hostnames || []
+  );
   const usingCustomHostname = props.usingValue;
   const setUsingCustomHostname = props.usingChangeCallback;
   const customHostname = props.hostnameValue;
   const setCustomHostname = props.hostnameChangeCallback;
 
   const isHostnameValid = (): boolean => {
-    return isLoopholeHostnameValid(customHostname);
+    return isNewholeHostnameValid(customHostname);
   };
 
   return (
@@ -67,6 +86,60 @@ const HostnameSettings = (props: BasicAuthSettingsProps): JSX.Element => {
           ) : (
             <p className="help is-danger">Hostname is invalid</p>
           )}
+        </div>
+      ) : null}
+      {usingCustomHostname && hostnames.length > 0 ? (
+        <div className="field">
+          <label className="label">Previously used hostnames</label>
+          <div className="control">
+            <div className="select is-fullwidth">
+              <select
+                defaultValue=""
+                onChange={(e) => {
+                  const hostname = e.target.value;
+                  if (hostname === "") return;
+                  setCustomHostname(hostname);
+                }}
+              >
+                <option value="">Select a hostname used before</option>
+                {hostnames.map((record) => (
+                  <option key={record.hostname} value={record.hostname}>
+                    {record.hostname} ({record.uses} uses, last{" "}
+                    {record.lastUsed ? record.lastUsed.substring(0, 10) : "unknown"})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="buttons are-small mt-2">
+            <button
+              className="button is-light"
+              type="button"
+              onClick={() =>
+                dispatch(send({ type: MessageTypeRequestHostnameHistory }))
+              }
+            >
+              Refresh
+            </button>
+            {hostnames.some(
+              (record) => record.hostname === customHostname && customHostname !== ""
+            ) ? (
+              <button
+                className="button is-danger is-light"
+                type="button"
+                onClick={() =>
+                  dispatch(
+                    send({
+                      type: MessageTypeRequestHostnameForget,
+                      payload: { hostname: customHostname },
+                    })
+                  )
+                }
+              >
+                Forget {customHostname}
+              </button>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>

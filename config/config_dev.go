@@ -1,15 +1,15 @@
+//go:build dev
 // +build dev
 
 package config
 
-import "github.com/loophole/cli/internal/app/loophole/models"
+import "github.com/name-cho/newhole/internal/app/newhole/models"
 
-// Config is global application config
 var Config = ApplicationConfig{
 	Version:         "development",
 	CommitHash:      "unknown",
 	ClientMode:      "unknown",
-	FeedbackFormURL: "https://bit.ly/3mvmZBA",
+	FeedbackFormURL: "https://github.com/name-cho/newhole/issues/new",
 
 	OAuth: OAuthConfig{
 		DeviceCodeURL: "https://loophole.eu.auth0.com/oauth/device/code",
@@ -32,4 +32,25 @@ var Config = ApplicationConfig{
 		Host:     "gateway.loophole.local",
 		Port:     8022,
 	},
+	TLS: TLSConfig{
+		Insecure:   true,
+		ServerName: "",
+	},
+	ACME: ACMEConfig{
+		Directory: "",
+		Email:     "",
+	},
+	Tunnels: TunnelConfig{
+		KeepAliveInterval: "30s",
+		ReconnectMinDelay: "500ms",
+		ReconnectMaxDelay: "30s",
+		DialTimeout:       "10s",
+		ForwardTimeout:    "10s",
+		MaxReconnects:     0,
+	},
+	HostKeyPolicy: "insecure",
+}
+
+func init() {
+	applyEnv()
 }

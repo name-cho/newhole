@@ -40,3 +40,13 @@ export const MessageTypeRequestTunnelStartWebDav: MessageType = `${PrefixMessage
 
 export const MessageTypeRequestLogout: MessageType = "MT_RequestLogout";
 export const MessageTypeRequestLogin: MessageType = "MT_RequestLogin";
+
+export const MessageTypeHostnameHistory: MessageType = "MT_HostnameHistory";
+export const MessageTypeRequestHostnameHistory: MessageType =
+  "MT_RequestHostnameHistory";
+export const MessageTypeRequestHostnameForget: MessageType =
+  "MT_RequestHostnameForget";
+
+export const MessageTypeActiveTunnels: MessageType = "MT_ActiveTunnels";
+export const MessageTypeRequestActiveTunnels: MessageType =
+  "MT_RequestActiveTunnels";

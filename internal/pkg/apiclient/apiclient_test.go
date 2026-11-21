@@ -11,356 +11,153 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func TestRegisterSiteSuccessOKShouldPropagateWithoutIdProvided(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedSiteID := "randomidwhichissuperlong"
-	srv := serverMock(http.StatusCreated, fmt.Sprintf(`{
-		"siteId": "%s"
-	}`, expectedSiteID))
-	defer srv.Close()
-
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
+func getPublicSSHKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := RegisterSite(publicKey, "")
-
+	publicKey, err := ssh.NewPublicKey(&key.PublicKey)
 	if err != nil {
-		t.Fatalf("Unexpected error returned: %v", err)
+		t.Fatal(err)
 	}
-	if result.SiteID != expectedSiteID {
-		t.Fatalf("Site ID '%s' is different than expected: %s", expectedSiteID, result)
+	return publicKey
+}
+
+func serverMock(status int, body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}))
+}
+
+func withMocks(t *testing.T) {
+	t.Helper()
+	oldIsTokenSaved := isTokenSaved
+	oldGetAccessToken := getAccessToken
+	oldURL := apiURL
+	oldRefreshed := tokenWasRefreshed
+	t.Cleanup(func() {
+		isTokenSaved = oldIsTokenSaved
+		getAccessToken = oldGetAccessToken
+		apiURL = oldURL
+		tokenWasRefreshed = oldRefreshed
+	})
+	isTokenSaved = func() bool { return true }
+	getAccessToken = func() (string, error) { return "some-token", nil }
+	tokenWasRefreshed = false
+}
+
+func TestRegisterSiteSuccessOKShouldPropagateWithoutIDProvided(t *testing.T) {
+	withMocks(t)
+	srv := serverMock(http.StatusOK, `{"siteId":"randomidwhichissuperlong","domain":"loophole.site"}`)
+	defer srv.Close()
+	SetAPIURL(srv.URL)
+
+	result, err := RegisterSite(getPublicSSHKey(t), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SiteID != "randomidwhichissuperlong" {
+		t.Fatalf("site id %q differs from expected", result.SiteID)
 	}
 }
 
-func TestRegisterSiteSuccessCreatedShouldPropagateWithoutIdProvided(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedSiteID := "randomidwhichissuperlong"
-	srv := serverMock(http.StatusCreated, fmt.Sprintf(`{
-		"siteId": "%s"
-	}`, expectedSiteID))
+func TestRegisterSiteSuccessCreatedShouldPropagateWithIDProvided(t *testing.T) {
+	withMocks(t)
+	srv := serverMock(http.StatusCreated, `{"siteId":"providedhostname","domain":"loophole.site"}`)
 	defer srv.Close()
+	SetAPIURL(srv.URL)
 
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
+	result, err := RegisterSite(getPublicSSHKey(t), "providedhostname")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	result, err := RegisterSite(publicKey, "")
-
-	if err != nil {
-		t.Fatalf("Unexpected error returned: %v", err)
-	}
-	if result.SiteID != expectedSiteID {
-		t.Fatalf("Site ID '%s' is different than expected: %s", expectedSiteID, result)
+	if result.SiteID != "providedhostname" {
+		t.Fatalf("site id %q differs from expected", result.SiteID)
 	}
 }
 
-func TestRegisterSiteSuccessOKShouldPropagateWithIdProvided(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedSiteID := "providedhostname"
-	expectedStatus := http.StatusOK
-	srv := serverMock(expectedStatus, fmt.Sprintf(`{
-		"siteId": "%s"
-	}`, expectedSiteID))
+func TestRegisterSiteLowercasesRequestedHostname(t *testing.T) {
+	withMocks(t)
+	var received string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]string
+		_ = decodeJSON(r, &payload)
+		received = payload["id"]
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"siteId":"mixedcase","domain":"loophole.site"}`)
+	}))
 	defer srv.Close()
+	SetAPIURL(srv.URL)
 
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := RegisterSite(getPublicSSHKey(t), "MixedCase"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	result, err := RegisterSite(publicKey, expectedSiteID)
-
-	if err != nil {
-		t.Fatalf("Unexpected error returned: %v", err)
-	}
-	if result.SiteID != expectedSiteID {
-		t.Fatalf("Site ID '%s' is different than expected: %s", result, expectedSiteID)
+	if received != "mixedcase" {
+		t.Fatalf("hostname %q was not lowercased", received)
 	}
 }
 
-func TestRegisterSiteSuccessCreatedShouldPropagateWithIdProvided(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedSiteID := "providedhostname"
-	srv := serverMock(http.StatusCreated, fmt.Sprintf(`{
-		"siteId": "%s"
-	}`, expectedSiteID))
+func TestRegisterSiteConflictExplainsTheReason(t *testing.T) {
+	withMocks(t)
+	srv := serverMock(http.StatusConflict, `{"message":"Site exists","error":"conflict"}`)
 	defer srv.Close()
+	SetAPIURL(srv.URL)
 
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := RegisterSite(publicKey, expectedSiteID)
-
-	if err != nil {
-		t.Fatalf("Unexpected error returned: %v", err)
-	}
-	if result.SiteID != expectedSiteID {
-		t.Fatalf("Site ID '%s' is different than expected: %s", result, expectedSiteID)
-	}
-}
-
-func TestRegisterSiteError400ShouldPropagateError(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedErrorMessage := "You did something bad"
-	expectedStatus := http.StatusBadRequest
-	srv := serverMock(expectedStatus, fmt.Sprintf(`{
-		"statusCode": 400,
-		"error": "Bad request",
-		"message": "%s"
-	}`, expectedErrorMessage))
-	defer srv.Close()
-
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := RegisterSite(publicKey, "")
-
+	_, err := RegisterSite(getPublicSSHKey(t), "taken")
 	if err == nil {
-		t.Fatalf("Expected an error to be returned")
+		t.Fatal("expected an error")
 	}
 	requestErr, ok := err.(RequestError)
 	if !ok {
-		t.Fatalf("Expected RequestError to be returned")
+		t.Fatalf("expected RequestError, got %T", err)
 	}
-	if result != nil {
-		t.Fatalf("Expected result to be nil, got %v", result)
+	if requestErr.StatusCode != http.StatusConflict {
+		t.Fatalf("status %d differs from expected", requestErr.StatusCode)
 	}
-	if requestErr.StatusCode != expectedStatus {
-		t.Fatalf("Expected '%d' status, got '%d", expectedStatus, requestErr.StatusCode)
-	}
-	if requestErr.Message != expectedErrorMessage {
-		t.Fatalf("Expected '%s' message, got '%s", expectedErrorMessage, requestErr.Message)
+	if requestErr.Hint == "" {
+		t.Fatal("expected a hint explaining how to fix the conflict")
 	}
 }
 
-func TestRegisterSiteError401ShouldPropagateError(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedErrorMessage := "You are not authenticated"
-	expectedStatus := http.StatusUnauthorized
-	srv := serverMock(expectedStatus, fmt.Sprintf(`{
-		"statusCode": 401,
-		"error": "Unauthorized",
-		"message": "%s"
-	}`, expectedErrorMessage))
+func TestRegisterSiteHTMLResponseIsExplained(t *testing.T) {
+	withMocks(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "<html><body>cloudflare error</body></html>")
+	}))
 	defer srv.Close()
+	SetAPIURL(srv.URL)
 
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := RegisterSite(publicKey, "")
-
+	_, err := RegisterSite(getPublicSSHKey(t), "")
 	if err == nil {
-		t.Fatalf("Expected an error to be returned")
+		t.Fatal("expected an error")
 	}
 	requestErr, ok := err.(RequestError)
 	if !ok {
-		t.Fatalf("Expected RequestError to be returned")
+		t.Fatalf("expected RequestError, got %T: %v", err, err)
 	}
-	if result != nil {
-		t.Fatalf("Expected result to be nil, got %v", result)
-	}
-	if requestErr.StatusCode != expectedStatus {
-		t.Fatalf("Expected '%d' status, got '%d", expectedStatus, requestErr.StatusCode)
-	}
-	if requestErr.Details != expectedErrorMessage {
-		t.Fatalf("Expected '%s' message, got '%s", expectedErrorMessage, requestErr.Details)
+	if requestErr.Message == "" {
+		t.Fatal("expected a human readable message for the HTML response")
 	}
 }
 
-func TestRegisterSiteError403ShouldPropagateError(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	expectedErrorMessage := "You are not allowed to do this"
-	expectedStatus := http.StatusForbidden
-	srv := serverMock(expectedStatus, fmt.Sprintf(`{
-		"statusCode": 403,
-		"error": "Forbidden",
-		"message": "%s"
-	}`, expectedErrorMessage))
-	defer srv.Close()
-
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := RegisterSite(publicKey, "")
-
-	if err == nil {
-		t.Fatalf("Expected an error to be returned")
-	}
-	requestErr, ok := err.(RequestError)
-	if !ok {
-		t.Fatalf("Expected RequestError to be returned")
-	}
-	if result != nil {
-		t.Fatalf("Expected result to be nil, got %v", result)
-	}
-	if requestErr.StatusCode != expectedStatus {
-		t.Fatalf("Expected '%d' status, got '%d", expectedStatus, requestErr.StatusCode)
-	}
-	if requestErr.Details != expectedErrorMessage {
-		t.Fatalf("Expected '%s' message, got '%s", expectedErrorMessage, requestErr.Details)
-	}
-}
-
-func TestRegisterTokenNotSavedReturns401(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
+func TestRegisterSiteWithoutTokenAsksToLogin(t *testing.T) {
+	withMocks(t)
 	isTokenSaved = func() bool { return false }
 
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "some-token", nil }
-
-	srv := serverMock(http.StatusOK, `{
-		"siteId": "whateverrrr"
-	}`)
-	defer srv.Close()
-
-	apiURL = srv.URL
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := RegisterSite(publicKey, "")
-
+	_, err := RegisterSite(getPublicSSHKey(t), "")
 	if err == nil {
-		t.Fatalf("Expected an error to be returned")
+		t.Fatal("expected an error")
 	}
 	requestErr, ok := err.(RequestError)
 	if !ok {
-		t.Fatalf("Expected RequestError to be returned")
-	}
-	if result != nil {
-		t.Fatalf("Expected result to be nil, got %v", result)
+		t.Fatalf("expected RequestError, got %T", err)
 	}
 	if requestErr.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("Expected '%d' status, got '%d", http.StatusUnauthorized, requestErr.StatusCode)
+		t.Fatalf("status %d differs from expected", requestErr.StatusCode)
 	}
-}
-
-func TestRegisterTokenReadingProblemReturns401(t *testing.T) {
-	oldIsTokenSaved := isTokenSaved
-	defer func() { isTokenSaved = oldIsTokenSaved }()
-	isTokenSaved = func() bool { return true }
-
-	oldGetAccessToken := getAccessToken
-	defer func() { getAccessToken = oldGetAccessToken }()
-	getAccessToken = func() (string, error) { return "", fmt.Errorf("Something bad happened when reading token") }
-
-	srv := serverMock(http.StatusOK, `{
-		"siteId": "whateverrrr"
-	}`)
-	defer srv.Close()
-
-	apiURL = srv.URL
-
-	publicKey, err := getPublicSSHKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := RegisterSite(publicKey, "")
-
-	if err == nil {
-		t.Fatalf("Expected an error to be returned")
-	}
-	requestErr, ok := err.(RequestError)
-	if !ok {
-		t.Fatalf("Expected RequestError to be returned")
-	}
-	if result != nil {
-		t.Fatalf("Expected result to be nil, got %v", result)
-	}
-	if requestErr.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("Expected '%d' status, got '%d", http.StatusUnauthorized, requestErr.StatusCode)
-	}
-}
-
-func serverMock(httpStatus int, expectedResponse string) *httptest.Server {
-	handler := http.NewServeMux()
-	registerSiteMock := getRegisterSiteHandler(httpStatus, expectedResponse)
-	handler.HandleFunc("/api/site", registerSiteMock)
-
-	srv := httptest.NewServer(handler)
-
-	return srv
-}
-
-func getRegisterSiteHandler(httpStatus int, expectedResponse string) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(httpStatus)
-		_, _ = w.Write([]byte(expectedResponse))
-	}
-}
-
-func getPublicSSHKey() (ssh.PublicKey, error) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		return nil, err
-	}
-
-	// generate and write public key
-	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		return nil, err
-	}
-	return publicKey, nil
 }

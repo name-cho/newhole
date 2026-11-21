@@ -17,7 +17,7 @@ import {
   isBasicAuthPasswordValid,
   isBasicAuthUsernameValid,
   isLocalPathValid,
-  isLoopholeHostnameValid,
+  isNewholeHostnameValid,
 } from "../features/validator/validators";
 
 const WebDav = () => {
@@ -34,7 +34,7 @@ const WebDav = () => {
 
   const areInputsValid = (): boolean => {
     if (!isLocalPathValid(path)) return false;
-    if (usingCustomHostname && !isLoopholeHostnameValid(customHostname))
+    if (usingCustomHostname && !isNewholeHostnameValid(customHostname))
       return false;
     if (
       usingBasicAuth &&
@@ -79,7 +79,7 @@ const WebDav = () => {
   return (
     <div className="container">
       <h1 className="subtitle is-4">
-        Exposes local directory to the public via loophole tunnel (download and
+        Exposes local directory to the public via Newhole tunnel (download and
         upload mode) available through secure WebDAV.
       </h1>
       <hr />

@@ -1,12 +1,11 @@
 package httpserver
 
 const (
-	// first %s is logoUrl, second %s is error message
 	proxyErrorTemplate = `<!DOCTYPE html>
 <html lang="en">
 	<head>
 	<meta charset="utf-8" />
-	<title>Loophole is running...</title>
+	<title>Newhole is running...</title>
 	<style>
 		html {
 		height: 100%%;
@@ -42,7 +41,7 @@ const (
 		<img
 		src="%s"
 		width="500px"
-		alt="Loophole"
+		alt="Newhole"
 		/>
 		<h1>Congratulations, your tunnel is up and running!</h1>
 		<p>
@@ -56,10 +55,8 @@ const (
 		<small>
 			This request would normally end up with 502 status code.
 			<br />
-			If that's what you intended please restart the tunnel with
-			<code>--disable-proxy-error-page</code> option
-			<br />
-			to remove this page and get regular 502 error.
+			Restart the tunnel with <code>--disable-proxy-error-page</code>
+			to get the plain 502 page instead.
 		</small>
 		</p>
 	</div>

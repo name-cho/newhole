@@ -1,4 +1,4 @@
-project_name: loophole
+project_name: newhole
 
 env:
   - GO111MODULE=on
@@ -6,100 +6,133 @@ env:
 before:
   hooks:
     - go mod download
-    
+
 builds:
-- id: loophole-cli
-  binary: loophole
-  goos:
-    - linux
-    - darwin
-  goarch:
-    - 386
-    - amd64
-    - arm
-    - arm64
-  goarm:
-    - 6
-    - 7
-  mod_timestamp: "{{ .CommitTimestamp }}"
-  ldflags:
-    - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
-- id: loophole-cli-win
-  binary: loophole
-  goos:
-    - windows
-  goarch:
-    - 386
-    - amd64
-  goarm:
-    - 6
-    - 7
-  mod_timestamp: "{{ .CommitTimestamp }}"
-  ldflags:
-    - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+  - id: newhole-cli
+    binary: newhole
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - 386
+      - amd64
+      - arm
+      - arm64
+    goarm:
+      - 5
+      - 6
+      - 7
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
-- id: loophole-desktop
-  binary: loophole-desktop
-  goos:
-    - darwin
-    - linux
-  goarch:
-    - amd64
-    - 386
-  mod_timestamp: "{{ .CommitTimestamp }}"
-  ldflags:
-    - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
-  flags:
-  - -tags=desktop
+  - id: newhole-cli-win
+    binary: newhole
+    goos:
+      - windows
+    goarch:
+      - 386
+      - amd64
+    goarm:
+      - 5
+      - 6
+      - 7
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
-- id: loophole-desktop-win
-  binary: loophole-desktop
-  goos:
-    - windows
-  goarch:
-    - amd64
-    - 386
-  mod_timestamp: "{{ .CommitTimestamp }}"
-  ldflags:
-    - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -H windowsgui
-  flags:
-  - -tags=desktop
+  - id: newhole-desktop
+    binary: newhole-desktop
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+    flags:
+      - -tags=desktop
+
+  - id: newhole-desktop-win
+    binary: newhole-desktop
+    goos:
+      - windows
+    goarch:
+      - amd64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -H windowsgui
+    flags:
+      - -tags=desktop
 
 archives:
   - id: cli
     builds:
-      - loophole-cli
-      - loophole-cli-win
+      - newhole-cli
+      - newhole-cli-win
     format_overrides:
       - goos: windows
         format: zip
-    wrap_in_directory: true
-    name_template: >-
-      {{ .ProjectName }}-cli_{{ .Version }}_
-      {{- if eq .Os "darwin" }}macos{{ else }}{{ title .Os }}{{ end }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-      {{- if .Mips }}_{{ .Mips }}{{ end }}
+    wrap_in_directory: false
+    name_template: "newhole_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+
   - id: desktop
     builds:
-      - loophole-desktop
-      - loophole-desktop-win
-    name_template: >-
-      {{ .ProjectName }}-desktop_{{ .Version }}_
-      {{- if eq .Os "darwin" }}macos{{ else }}{{ title .Os }}{{ end }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-      {{- if .Mips }}_{{ .Mips }}{{ end }}
+      - newhole-desktop
+      - newhole-desktop-win
+    name_template: "newhole-desktop_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
     format_overrides:
       - goos: windows
         format: zip
-    wrap_in_directory: true
+    wrap_in_directory: false
+
+nfpms:
+  - id: packages
+    package_name: newhole
+    builds:
+      - newhole-cli
+    vendor: Newhole
+    homepage: https://github.com/name-cho/newhole
+    maintainer: Newhole maintainers
+    description: Expose local services through end to end TLS encrypted tunnels
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+
+brews:
+  - name: newhole
+    repository:
+      owner: name-cho
+      name: homebrew-newhole
+    homepage: https://github.com/name-cho/newhole
+    description: Expose local services through end to end TLS encrypted tunnels
+    license: Apache-2.0
+    install: |
+      bin.install "newhole"
+    test: |
+      system "#{bin}/newhole", "--version"
+
 checksum:
   name_template: "checksums.txt"
+
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    output: true
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+
+sboms:
+  - artifacts: archive
 
 snapshot:
   name_template: "{{ .Tag }}-next"
