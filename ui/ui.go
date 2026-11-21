@@ -10,17 +10,24 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/ncruces/zenity"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/skratchdot/open-golang/open"
 	"github.com/zserge/lorca"
 
+	"github.com/name-cho/newhole/config"
 	"github.com/name-cho/newhole/internal/app/newhole"
 	lm "github.com/name-cho/newhole/internal/app/newhole/models"
 	"github.com/name-cho/newhole/internal/pkg/cache"
+	"github.com/name-cho/newhole/internal/pkg/closehandler"
 	"github.com/name-cho/newhole/internal/pkg/communication"
 	"github.com/name-cho/newhole/internal/pkg/state"
 	"github.com/name-cho/newhole/internal/pkg/token"
@@ -122,8 +129,9 @@ func handleMessage(decodedMessage Message) {
 			communication.Warn("Unable to decode the HTTP tunnel configuration: " + err.Error())
 			return
 		}
-		rememberTunnel("http", exposeHTTPConfig.Remote.TunnelID, decodedMessage.Payload)
+		rememberTunnel("http", exposeHTTPConfig.Remote.TunnelID, exposeHTTPConfig)
 		startTunnel(&exposeHTTPConfig.Remote, func(authMethod ssh.AuthMethod) error {
+			updateRememberedTunnel("http", exposeHTTPConfig, &exposeHTTPConfig.Remote)
 			return newhole.ForwardPort(exposeHTTPConfig, authMethod, quit(exposeHTTPConfig.Remote.TunnelID))
 		})
 	case MessageTypeStartTunnelDirectory:
@@ -132,8 +140,9 @@ func handleMessage(decodedMessage Message) {
 			communication.Warn("Unable to decode the directory tunnel configuration: " + err.Error())
 			return
 		}
-		rememberTunnel("path", exposeDirectoryConfig.Remote.TunnelID, decodedMessage.Payload)
+		rememberTunnel("path", exposeDirectoryConfig.Remote.TunnelID, exposeDirectoryConfig)
 		startTunnel(&exposeDirectoryConfig.Remote, func(authMethod ssh.AuthMethod) error {
+			updateRememberedTunnel("path", exposeDirectoryConfig, &exposeDirectoryConfig.Remote)
 			return newhole.ForwardDirectory(exposeDirectoryConfig, authMethod, quit(exposeDirectoryConfig.Remote.TunnelID))
 		})
 	case MessageTypeStartTunnelWebDav:
@@ -142,8 +151,9 @@ func handleMessage(decodedMessage Message) {
 			communication.Warn("Unable to decode the WebDAV tunnel configuration: " + err.Error())
 			return
 		}
-		rememberTunnel("webdav", exposeWebdavConfig.Remote.TunnelID, decodedMessage.Payload)
+		rememberTunnel("webdav", exposeWebdavConfig.Remote.TunnelID, exposeWebdavConfig)
 		startTunnel(&exposeWebdavConfig.Remote, func(authMethod ssh.AuthMethod) error {
+			updateRememberedTunnel("webdav", exposeWebdavConfig, &exposeWebdavConfig.Remote)
 			return newhole.ForwardDirectoryViaWebdav(exposeWebdavConfig, authMethod, quit(exposeWebdavConfig.Remote.TunnelID))
 		})
 	case MessageTypeActiveTunnels:
@@ -201,10 +211,45 @@ func quit(tunnelID string) <-chan bool {
 	return channel
 }
 
-func rememberTunnel(mode string, tunnelID string, payload json.RawMessage) {
+func rememberTunnel(mode string, tunnelID string, payload any) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		communication.Debug("unable to encode the tunnel: " + err.Error())
+		return
+	}
+	rememberTunnelRaw(mode, tunnelID, encoded)
+}
+
+func rememberTunnelRaw(mode string, tunnelID string, payload json.RawMessage) {
 	if err := state.SaveActiveTunnel(state.ActiveTunnel{TunnelID: tunnelID, Mode: mode, Payload: payload}); err != nil {
 		communication.Debug("unable to remember the tunnel: " + err.Error())
 	}
+}
+
+func updateRememberedTunnel(mode string, payload any, remote *lm.RemoteEndpointSpecs) {
+	if remote == nil {
+		return
+	}
+	if data, err := json.Marshal(struct {
+		Local  json.RawMessage        `json:"local"`
+		Remote lm.RemoteEndpointSpecs `json:"remote"`
+	}{Local: localPayload(payload), Remote: *remote}); err == nil {
+		rememberTunnelRaw(mode, remote.TunnelID, data)
+	}
+}
+
+func localPayload(payload any) json.RawMessage {
+	var wrapper struct {
+		Local json.RawMessage `json:"local"`
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	if err := json.Unmarshal(encoded, &wrapper); err != nil {
+		return json.RawMessage("{}")
+	}
+	return wrapper.Local
 }
 
 func forgetTunnel(tunnelID string) {
@@ -250,10 +295,6 @@ func startTunnel(remote *lm.RemoteEndpointSpecs, forward func(ssh.AuthMethod) er
 		}
 
 		forgetTunnel(remote.TunnelID)
-		tunnelsMutex.Lock()
-		releaseTunnel(remote.TunnelID)
-		tunnelsMutex.Unlock()
-		communication.ActiveTunnels()
 	}()
 }
 
@@ -318,13 +359,7 @@ func startLogout() {
 var box embed.FS
 
 func Display() {
-	if lorca.LocateChrome() == "" {
-		message := "Chrome or Chromium (>= 70) is required to run the Newhole desktop app"
-		if _, err := zenity.Error(message); err != nil {
-			communication.Debug("unable to show a dialog: " + err.Error())
-		}
-		communication.Fatal(message)
-	}
+	setupDesktopLogging()
 
 	subFS, err := fs.Sub(box, "desktop/build")
 	if err != nil {
@@ -332,7 +367,7 @@ func Display() {
 	}
 
 	router := http.NewServeMux()
-	router.Handle("/", http.FileServer(http.FS(subFS)))
+	router.Handle("/", spaHandler(subFS))
 	router.HandleFunc("/ws", websocketHandler)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -342,22 +377,75 @@ func Display() {
 	server := &http.Server{Handler: router, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			communication.Fatal("Local UI server stopped: " + err.Error())
+			communication.Error("Local UI server stopped: " + err.Error())
 		}
 	}()
 
-	url := fmt.Sprintf("http://%s", listener.Addr().String())
-	window, err := lorca.New(url, "", 980, 800,
-		"--remote-allow-origins="+url,
-		"--remote-allow-origins=http://127.0.0.1",
+	address := fmt.Sprintf("http://%s", listener.Addr().String())
+	closehandler.SetupCloseHandler(config.Config.FeedbackFormURL)
+	restoreActiveTunnels()
+
+	if openNativeWindow(address) {
+		return
+	}
+
+	if lorca.LocateChrome() == "" {
+		openInBrowserFallback(address, "Chrome/Chromium not found")
+		return
+	}
+
+	window, err := lorca.New(address, "", 980, 800,
+		"--remote-allow-origins="+address,
 		"--disable-features=Translate",
 		"--no-first-run",
 	)
 	if err != nil {
-		communication.Fatal("Unable to start Chrome/Chromium: " + err.Error())
+		openInBrowserFallback(address, err.Error())
+		return
 	}
 	defer window.Close()
 
 	<-window.Done()
 	_ = server.Close()
+}
+
+func setupDesktopLogging() {
+	logPath := cache.GetLocalStorageFile("desktop-"+time.Now().Format("2006-01-02")+".log", "logs")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	communication.SetLogFile(logFile)
+	log.Logger = zerolog.New(logFile).With().Timestamp().Logger()
+}
+
+func spaHandler(files fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(files))
+	index, indexErr := fs.ReadFile(files, "index.html")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleanPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if cleanPath != "" && cleanPath != "." {
+			if info, err := fs.Stat(files, cleanPath); err == nil && !info.IsDir() {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+		if indexErr != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(index)
+	})
+}
+
+func openInBrowserFallback(address string, reason string) {
+	communication.Warn("Desktop window is unavailable, opening the default browser: " + reason)
+	if err := open.Run(address); err != nil {
+		zenity.Error("Unable to start a browser window (" + reason + "), and the default browser did not open: " + err.Error())
+		return
+	}
+	zenity.Info("Newhole is running in your browser. Close this window to stop it.",
+		zenity.Title("Newhole"),
+		zenity.Icon(zenity.InfoIcon))
 }

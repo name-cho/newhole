@@ -28,8 +28,16 @@ gateway and API, but every rough edge of the original client has been reworked.
   capped, CORS preflights are handled and an optional per-IP rate limiter is available.
 * Unix socket upstreams are supported: `newhole http unix:/run/app.sock`.
 * The local directory server hides directory listings unless `--directory-listing` is used.
-* The desktop app survives Chromium >= 70 (including the `--remote-allow-origins` change),
-  reports errors instead of dying silently and cleans up tunnels that fail to start.
+* The desktop app opens a native WebView2 window on Windows, so Chrome is not required; without
+  WebView2 it falls back to Chrome and then to the default browser instead of exiting.
+* Deep links inside the desktop UI work after a reload (the local server serves the SPA entry
+  point for unknown routes).
+* Active desktop tunnels are saved in `active-tunnels.json` with their full remote settings and
+  come back after a restart.
+* A plain `http://` request to a tunnel is answered with a 301 redirect to `https://`, while
+  TLS and h2 keep working on the same listener.
+* The desktop app logs to `~/.newhole/logs/desktop-YYYY-MM-DD.log` and keeps working when there
+  is no terminal attached.
 * The terminal output is serialized, so Windows consoles do not scramble it, and the logger
   no longer kills the process on a broken websocket.
 * Credentials are stored in `~/.newhole` with `0600` permissions, the old `~/.loophole`

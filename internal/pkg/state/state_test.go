@@ -1,6 +1,7 @@
 package state
 
 import (
+	"runtime"
 	"os"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestHostnameHistoryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("history permissions %v differ from 0600", info.Mode().Perm())
 	}
 

@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"runtime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,7 @@ func TestParsePublicKeyGeneratesEd25519Key(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("private key permissions %v differ from 0600", info.Mode().Perm())
 	}
 	if _, err := os.Stat(identity + ".pub"); err != nil {

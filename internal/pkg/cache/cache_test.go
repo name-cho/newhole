@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"runtime"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,7 +27,7 @@ func TestGetLocalStorageDirCreatesDirectory(t *testing.T) {
 	if !info.IsDir() {
 		t.Fatalf("path %q is not a directory", created)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("directory permissions %v differ from 0700", info.Mode().Perm())
 	}
 }

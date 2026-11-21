@@ -96,7 +96,7 @@ func startLocalHTTPServer(tunnelID string, server *http.Server) (*lm.Endpoint, e
 	}
 
 	go func() {
-		if err := server.ServeTLS(listener, "", ""); err != nil && err != http.ErrServerClosed {
+		if err := httpserver.Serve(server, listener); err != nil && err != http.ErrServerClosed {
 			communication.TunnelDebug(tunnelID, "local TLS proxy stopped: "+err.Error())
 		}
 	}()
