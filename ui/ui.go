@@ -10,270 +10,354 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/ncruces/zenity"
-	"github.com/rs/zerolog/log"
 	"github.com/skratchdot/open-golang/open"
 	"github.com/zserge/lorca"
 
-	"github.com/gorilla/websocket"
-
-	"github.com/loophole/cli/internal/app/loophole"
-	lm "github.com/loophole/cli/internal/app/loophole/models"
-	"github.com/loophole/cli/internal/pkg/cache"
-	"github.com/loophole/cli/internal/pkg/communication"
-	"github.com/loophole/cli/internal/pkg/token"
+	"github.com/name-cho/newhole/internal/app/newhole"
+	lm "github.com/name-cho/newhole/internal/app/newhole/models"
+	"github.com/name-cho/newhole/internal/pkg/cache"
+	"github.com/name-cho/newhole/internal/pkg/communication"
+	"github.com/name-cho/newhole/internal/pkg/state"
+	"github.com/name-cho/newhole/internal/pkg/token"
+	"golang.org/x/crypto/ssh"
 )
 
-var upgrader = websocket.Upgrader{} // use default options
-var authQuitChannel = make(chan bool)
-var authAlreadyRan = false
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		return origin == "http://"+r.Host || origin == "https://"+r.Host
+	},
+}
 
-var tunnelQuitChannels = make(map[string](chan bool))
+var tunnelsMutex sync.Mutex
+
+var tunnelQuitChannels = make(map[string]chan bool)
 var siteToRequestMapping = make(map[string]string)
+
+var loginMutex sync.Mutex
+var loginCancel chan bool
+
+func lockTunnels() func() {
+	tunnelsMutex.Lock()
+	return tunnelsMutex.Unlock
+}
+
+func reserveSite(siteID string, tunnelID string) error {
+	if siteID == "" {
+		return nil
+	}
+	if _, ok := siteToRequestMapping[siteID]; ok {
+		return fmt.Errorf("a tunnel for hostname %q is already running", siteID)
+	}
+	siteToRequestMapping[siteID] = tunnelID
+	return nil
+}
+
+func releaseTunnel(tunnelID string) {
+	for siteID, mapped := range siteToRequestMapping {
+		if mapped == tunnelID {
+			delete(siteToRequestMapping, siteID)
+		}
+	}
+	delete(tunnelQuitChannels, tunnelID)
+}
 
 func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Print("upgrade:", err)
 		return
 	}
 	defer c.Close()
+
 	communication.SetCommunicationMechanism(communication.NewWebsocketLogger(c))
-	loggedIn := token.IsTokenSaved()
-	idToken := token.GetIdToken()
-	communication.ApplicationStart(loggedIn, idToken)
+	defer communication.SetCommunicationMechanism(communication.NewStdOutLogger())
+
+	communication.ApplicationStart(token.IsTokenSaved(), token.GetIdToken())
+	communication.HostnameHistory()
+	communication.ActiveTunnels()
+
+	closed := make(chan struct{})
+	go func() {
+		<-closed
+		tunnelsMutex.Lock()
+		pending := make([]string, 0, len(tunnelQuitChannels))
+		for tunnelID := range tunnelQuitChannels {
+			pending = append(pending, tunnelID)
+		}
+		tunnelsMutex.Unlock()
+		for _, tunnelID := range pending {
+			stopTunnel(tunnelID)
+		}
+	}()
+	defer close(closed)
+
 	for {
 		_, message, err := c.ReadMessage()
 		if err != nil {
-			log.Warn().Err(err).Msg("read:")
 			break
 		}
 		var decodedMessage Message
-		err = json.Unmarshal(message, &decodedMessage)
+		if err := json.Unmarshal(message, &decodedMessage); err != nil {
+			communication.Warn("Unable to decode the incoming message: " + err.Error())
+			continue
+		}
+		handleMessage(decodedMessage)
+	}
+	communication.ApplicationStop()
+}
+
+func handleMessage(decodedMessage Message) {
+	switch decodedMessage.Type {
+	case MessageTypeStartTunnelHTTP:
+		var exposeHTTPConfig lm.ExposeHTTPConfig
+		if err := json.Unmarshal(decodedMessage.Payload, &exposeHTTPConfig); err != nil {
+			communication.Warn("Unable to decode the HTTP tunnel configuration: " + err.Error())
+			return
+		}
+		rememberTunnel("http", exposeHTTPConfig.Remote.TunnelID, decodedMessage.Payload)
+		startTunnel(&exposeHTTPConfig.Remote, func(authMethod ssh.AuthMethod) error {
+			return newhole.ForwardPort(exposeHTTPConfig, authMethod, quit(exposeHTTPConfig.Remote.TunnelID))
+		})
+	case MessageTypeStartTunnelDirectory:
+		var exposeDirectoryConfig lm.ExposeDirectoryConfig
+		if err := json.Unmarshal(decodedMessage.Payload, &exposeDirectoryConfig); err != nil {
+			communication.Warn("Unable to decode the directory tunnel configuration: " + err.Error())
+			return
+		}
+		rememberTunnel("path", exposeDirectoryConfig.Remote.TunnelID, decodedMessage.Payload)
+		startTunnel(&exposeDirectoryConfig.Remote, func(authMethod ssh.AuthMethod) error {
+			return newhole.ForwardDirectory(exposeDirectoryConfig, authMethod, quit(exposeDirectoryConfig.Remote.TunnelID))
+		})
+	case MessageTypeStartTunnelWebDav:
+		var exposeWebdavConfig lm.ExposeWebdavConfig
+		if err := json.Unmarshal(decodedMessage.Payload, &exposeWebdavConfig); err != nil {
+			communication.Warn("Unable to decode the WebDAV tunnel configuration: " + err.Error())
+			return
+		}
+		rememberTunnel("webdav", exposeWebdavConfig.Remote.TunnelID, decodedMessage.Payload)
+		startTunnel(&exposeWebdavConfig.Remote, func(authMethod ssh.AuthMethod) error {
+			return newhole.ForwardDirectoryViaWebdav(exposeWebdavConfig, authMethod, quit(exposeWebdavConfig.Remote.TunnelID))
+		})
+	case MessageTypeActiveTunnels:
+		communication.ActiveTunnels()
+	case MessageTypeRefreshHistory:
+		communication.HostnameHistory()
+	case MessageTypeForgetHostname:
+		var forgetHostnameMessage ForgetHostnameMessage
+		if err := json.Unmarshal(decodedMessage.Payload, &forgetHostnameMessage); err != nil {
+			communication.Warn("Unable to decode the forget hostname message: " + err.Error())
+			return
+		}
+		if err := state.ForgetHostname(forgetHostnameMessage.Hostname); err != nil {
+			communication.Warn("Unable to forget " + forgetHostnameMessage.Hostname + ": " + err.Error())
+			return
+		}
+		communication.HostnameHistory()
+	case MessageTypeStopTunnel:
+		var stopTunnelMessage StopTunnelMessage
+		if err := json.Unmarshal(decodedMessage.Payload, &stopTunnelMessage); err != nil {
+			communication.Warn("Unable to decode the stop tunnel message: " + err.Error())
+			return
+		}
+		stopTunnel(stopTunnelMessage.TunnelID)
+	case MessageTypeAuthorization:
+		startLogin()
+	case MessageTypeLogout:
+		startLogout()
+	case MessageTypeOpenBrowser:
+		var openInBrowserMessage OpenInBrowserMessage
+		if err := json.Unmarshal(decodedMessage.Payload, &openInBrowserMessage); err != nil {
+			communication.Warn("Unable to decode the open browser message: " + err.Error())
+			return
+		}
+		go func() {
+			if err := open.Run(openInBrowserMessage.URL); err != nil {
+				communication.Warn("Unable to open " + openInBrowserMessage.URL + ": " + err.Error())
+			}
+		}()
+	case MessageTypePing:
+		communication.Debug("ping")
+	default:
+		communication.Warn(fmt.Sprintf("Unrecognized message type %q", decodedMessage.Type))
+	}
+}
+
+func quit(tunnelID string) <-chan bool {
+	tunnelsMutex.Lock()
+	defer tunnelsMutex.Unlock()
+	channel, ok := tunnelQuitChannels[tunnelID]
+	if !ok {
+		channel = make(chan bool, 1)
+		tunnelQuitChannels[tunnelID] = channel
+	}
+	return channel
+}
+
+func rememberTunnel(mode string, tunnelID string, payload json.RawMessage) {
+	if err := state.SaveActiveTunnel(state.ActiveTunnel{TunnelID: tunnelID, Mode: mode, Payload: payload}); err != nil {
+		communication.Debug("unable to remember the tunnel: " + err.Error())
+	}
+}
+
+func forgetTunnel(tunnelID string) {
+	if err := state.RemoveActiveTunnel(tunnelID); err != nil {
+		communication.Debug("unable to forget the tunnel: " + err.Error())
+	}
+}
+
+func startTunnel(remote *lm.RemoteEndpointSpecs, forward func(ssh.AuthMethod) error) {
+	go func() {
+		unlock := lockTunnels()
+		sshDir := cache.GetLocalStorageDir(".ssh")
+		remote.IdentityFile = fmt.Sprintf("%s/id_rsa", sshDir)
+		remote.NormalizeHostname()
+		if err := reserveSite(remote.SiteID, remote.TunnelID); err != nil {
+			unlock()
+			communication.TunnelStartFailure(remote.TunnelID, err)
+			return
+		}
+		quit(remote.TunnelID)
+		unlock()
+
+		authMethod, err := newhole.RegisterTunnel(remote)
 		if err != nil {
-			communication.Warn("Error decoding message")
-			communication.Warn(err.Error())
+			communication.TunnelStartFailure(remote.TunnelID, err)
+			tunnelsMutex.Lock()
+			releaseTunnel(remote.TunnelID)
+			tunnelsMutex.Unlock()
+			return
 		}
 
-		switch decodedMessage.Type {
-		case MessageTypeStartTunnelHTTP:
-			var exposeHTTPConfig lm.ExposeHTTPConfig
-			err = json.Unmarshal(decodedMessage.Payload, &exposeHTTPConfig)
-			if err != nil {
-				communication.Warn("Error decoding message")
-				communication.Warn(err.Error())
-			}
-			tunnelQuitChannel := make(chan bool)
-			go func() {
-				sshDir := cache.GetLocalStorageDir(".ssh") //getting our sshDir and creating it, if it doesn't exist
-				exposeHTTPConfig.Remote.IdentityFile = fmt.Sprintf("%s/id_rsa", sshDir)
+		tunnelsMutex.Lock()
+		if existing, ok := siteToRequestMapping[remote.SiteID]; ok && existing != remote.TunnelID {
+			tunnelsMutex.Unlock()
+			communication.TunnelStartFailure(remote.TunnelID, fmt.Errorf("a tunnel for hostname %q is already running", remote.SiteID))
+			return
+		}
+		siteToRequestMapping[remote.SiteID] = remote.TunnelID
+		tunnelsMutex.Unlock()
 
-				communication.TunnelDebug(exposeHTTPConfig.Remote.TunnelID, fmt.Sprintf("Got request for SiteID: '%s'", exposeHTTPConfig.Remote.SiteID))
-				if _, ok := siteToRequestMapping[exposeHTTPConfig.Remote.SiteID]; exposeHTTPConfig.Remote.SiteID != "" && ok {
-					communication.TunnelStartFailure(exposeHTTPConfig.Remote.TunnelID,
-						fmt.Errorf("Tunnel '%s' is already running", exposeHTTPConfig.Remote.SiteID))
-					return
-				}
-				authMethod, err := loophole.RegisterTunnel(&exposeHTTPConfig.Remote)
-				if err != nil {
-					communication.TunnelStartFailure(exposeHTTPConfig.Remote.TunnelID, err)
-					return
-				}
-				communication.TunnelDebug(exposeHTTPConfig.Remote.TunnelID, fmt.Sprintf("Obtained SiteID: '%s'", exposeHTTPConfig.Remote.SiteID))
-				if _, ok := siteToRequestMapping[exposeHTTPConfig.Remote.SiteID]; ok {
-					communication.TunnelStartFailure(exposeHTTPConfig.Remote.TunnelID,
-						fmt.Errorf("Tunnel '%s' is already running", exposeHTTPConfig.Remote.SiteID))
-					return
-				}
-				tunnelQuitChannels[exposeHTTPConfig.Remote.TunnelID] = tunnelQuitChannel
-				siteToRequestMapping[exposeHTTPConfig.Remote.SiteID] = exposeHTTPConfig.Remote.TunnelID
-				loophole.ForwardPort(exposeHTTPConfig, authMethod, tunnelQuitChannel)
-			}()
-		case MessageTypeStartTunnelDirectory:
-			var exposeDirectoryConfig lm.ExposeDirectoryConfig
-			err = json.Unmarshal(decodedMessage.Payload, &exposeDirectoryConfig)
-			if err != nil {
-				communication.Warn("Error decoding message")
-				communication.Warn(err.Error())
-			}
+		if err := forward(authMethod); err != nil {
+			communication.TunnelStartFailure(remote.TunnelID, err)
+		}
 
-			tunnelQuitChannel := make(chan bool)
-			go func() {
-				sshDir := cache.GetLocalStorageDir(".ssh") //getting our sshDir and creating it, if it doesn't exist
-				exposeDirectoryConfig.Remote.IdentityFile = fmt.Sprintf("%s/id_rsa", sshDir)
+		forgetTunnel(remote.TunnelID)
+		tunnelsMutex.Lock()
+		releaseTunnel(remote.TunnelID)
+		tunnelsMutex.Unlock()
+		communication.ActiveTunnels()
+	}()
+}
 
-				communication.TunnelDebug(exposeDirectoryConfig.Remote.TunnelID, fmt.Sprintf("Got request for SiteID: '%s'", exposeDirectoryConfig.Remote.SiteID))
-				if _, ok := siteToRequestMapping[exposeDirectoryConfig.Remote.SiteID]; exposeDirectoryConfig.Remote.SiteID != "" && ok {
-					communication.TunnelStartFailure(exposeDirectoryConfig.Remote.TunnelID,
-						fmt.Errorf("Tunnel '%s' is already running", exposeDirectoryConfig.Remote.SiteID))
+func stopTunnel(tunnelID string) {
+	forgetTunnel(tunnelID)
+	tunnelsMutex.Lock()
+	channel, ok := tunnelQuitChannels[tunnelID]
+	tunnelsMutex.Unlock()
+	if !ok {
+		communication.ActiveTunnels()
+		return
+	}
+	select {
+	case channel <- true:
+	default:
+	}
+}
 
-					return
-				}
-
-				authMethod, err := loophole.RegisterTunnel(&exposeDirectoryConfig.Remote)
-				if err != nil {
-					communication.TunnelStartFailure(exposeDirectoryConfig.Remote.TunnelID, err)
-					return
-
-				}
-				communication.TunnelDebug(exposeDirectoryConfig.Remote.TunnelID, fmt.Sprintf("Obtained SiteID: '%s'", exposeDirectoryConfig.Remote.SiteID))
-				if _, ok := siteToRequestMapping[exposeDirectoryConfig.Remote.SiteID]; ok {
-					communication.TunnelStartFailure(exposeDirectoryConfig.Remote.TunnelID,
-						fmt.Errorf("Tunnel '%s' is already running", exposeDirectoryConfig.Remote.SiteID))
-					return
-				}
-				tunnelQuitChannels[exposeDirectoryConfig.Remote.TunnelID] = tunnelQuitChannel
-				siteToRequestMapping[exposeDirectoryConfig.Remote.SiteID] = exposeDirectoryConfig.Remote.TunnelID
-				loophole.ForwardDirectory(exposeDirectoryConfig, authMethod, tunnelQuitChannel)
-			}()
-		case MessageTypeStartTunnelWebDav:
-			var exposeWebdavConfig lm.ExposeWebdavConfig
-			err = json.Unmarshal(decodedMessage.Payload, &exposeWebdavConfig)
-			if err != nil {
-				communication.Warn("Error decoding message")
-				communication.Warn(err.Error())
-			}
-
-			tunnelQuitChannel := make(chan bool)
-			go func() {
-				sshDir := cache.GetLocalStorageDir(".ssh") //getting our sshDir and creating it, if it doesn't exist
-				exposeWebdavConfig.Remote.IdentityFile = fmt.Sprintf("%s/id_rsa", sshDir)
-
-				communication.TunnelDebug(exposeWebdavConfig.Remote.TunnelID, fmt.Sprintf("Got request for SiteID: '%s'", exposeWebdavConfig.Remote.SiteID))
-				if _, ok := siteToRequestMapping[exposeWebdavConfig.Remote.SiteID]; exposeWebdavConfig.Remote.SiteID != "" && ok {
-					communication.TunnelStartFailure(exposeWebdavConfig.Remote.TunnelID,
-						fmt.Errorf("Tunnel '%s' is already running", exposeWebdavConfig.Remote.SiteID))
-					return
-				}
-
-				authMethod, err := loophole.RegisterTunnel(&exposeWebdavConfig.Remote)
-				if err != nil {
-					communication.TunnelStartFailure(exposeWebdavConfig.Remote.TunnelID, err)
-					return
-				}
-
-				communication.TunnelDebug(exposeWebdavConfig.Remote.TunnelID, fmt.Sprintf("Obtained SiteID: '%s'", exposeWebdavConfig.Remote.SiteID))
-				if _, ok := siteToRequestMapping[exposeWebdavConfig.Remote.SiteID]; ok {
-					communication.TunnelStartFailure(exposeWebdavConfig.Remote.TunnelID,
-						fmt.Errorf("Tunnel '%s' is already running", exposeWebdavConfig.Remote.SiteID))
-					return
-				}
-
-				tunnelQuitChannels[exposeWebdavConfig.Remote.TunnelID] = tunnelQuitChannel
-				siteToRequestMapping[exposeWebdavConfig.Remote.SiteID] = exposeWebdavConfig.Remote.TunnelID
-				loophole.ForwardDirectoryViaWebdav(exposeWebdavConfig, authMethod, tunnelQuitChannel)
-			}()
-		case MessageTypeStopTunnel:
-			var stopTunnelMessage StopTunnelMessage
-			err = json.Unmarshal(decodedMessage.Payload, &stopTunnelMessage)
-			if err != nil {
-				communication.Warn("Error decoding message")
-				communication.Warn(err.Error())
-			}
-			tunnelQuitChannels[stopTunnelMessage.TunnelID] <- true
-			siteID, ok := findKeyByValue(siteToRequestMapping, stopTunnelMessage.TunnelID)
-			if ok {
-				communication.Debug(fmt.Sprintf("Removing %s from the dict", siteID))
-				delete(siteToRequestMapping, siteID)
-
-			}
-		case MessageTypeAuthorization:
-			if authAlreadyRan {
-				authQuitChannel <- true
-			} else {
-				authAlreadyRan = true
-			}
-			go func() {
-				deviceCodeSpec, err := token.RegisterDevice()
-				if err != nil {
-					communication.LoginFailure(fmt.Errorf("Error obtaining device code: %s", err.Error()))
-				}
-				communication.LoginStart(*deviceCodeSpec)
-				tokens, err := token.PollForToken(deviceCodeSpec.DeviceCode, deviceCodeSpec.Interval, authQuitChannel)
-				if err != nil {
-					communication.LoginFailure(fmt.Errorf("Error obtaining token: %s", err.Error()))
-					return
-				}
-				err = token.SaveToken(tokens)
-				if err != nil {
-					communication.LoginFailure(fmt.Errorf("Error saving token: %s", err.Error()))
-					return
-				}
-				communication.LoginSuccess(tokens.IDToken)
-				communication.Info("Logged in successfully")
-			}()
-		case MessageTypeLogout:
-			authAlreadyRan = false
-			go func() {
-				err := token.DeleteTokens()
-				if err != nil {
-					communication.LogoutFailure(fmt.Errorf("Error logging out: %s", err.Error()))
-					return
-				}
-				communication.LogoutSuccess()
-				communication.Info("Logged out successfully")
-			}()
-		case MessageTypeOpenBrowser:
-			var openInBrowserMessage OpenInBrowserMessage
-			err = json.Unmarshal(decodedMessage.Payload, &openInBrowserMessage)
-			if err != nil {
-				communication.Warn("Error decoding message")
-				communication.Warn(err.Error())
-			}
-			go func() {
-				err := open.Run(openInBrowserMessage.URL)
-				if err != nil {
-					communication.Warn("Error opening url")
-					communication.Warn(err.Error())
-				}
-			}()
+func startLogin() {
+	loginMutex.Lock()
+	if loginCancel != nil {
+		select {
+		case loginCancel <- true:
 		default:
-			communication.Warn(fmt.Sprintf("Unrecognized message type", decodedMessage.Type))
 		}
 	}
+	loginCancel = make(chan bool, 1)
+	cancel := loginCancel
+	loginMutex.Unlock()
+
+	go func() {
+		deviceCodeSpec, err := token.RegisterDevice()
+		if err != nil {
+			communication.LoginFailure(err)
+			return
+		}
+		communication.LoginStart(*deviceCodeSpec)
+		tokens, err := token.PollForToken(deviceCodeSpec.DeviceCode, deviceCodeSpec.Interval, cancel)
+		if err != nil {
+			communication.LoginFailure(err)
+			return
+		}
+		if err := token.SaveToken(tokens); err != nil {
+			communication.LoginFailure(err)
+			return
+		}
+		communication.LoginSuccess(tokens.IDToken)
+	}()
+}
+
+func startLogout() {
+	go func() {
+		if err := token.DeleteTokens(); err != nil {
+			communication.LogoutFailure(err)
+			return
+		}
+		communication.LogoutSuccess()
+	}()
 }
 
 //go:embed desktop/build/*
 var box embed.FS
 
-// Display shows the main app window
 func Display() {
-	chromeLocation := lorca.LocateChrome()
-	if chromeLocation == "" {
-		message := "Chrome/Chromium >= 70 is required."
-		zenity.Error(message)
+	if lorca.LocateChrome() == "" {
+		message := "Chrome or Chromium (>= 70) is required to run the Newhole desktop app"
+		if _, err := zenity.Error(message); err != nil {
+			communication.Debug("unable to show a dialog: " + err.Error())
+		}
 		communication.Fatal(message)
 	}
 
 	subFS, err := fs.Sub(box, "desktop/build")
 	if err != nil {
-		panic(err)
+		communication.Fatal("Unable to read the bundled UI: " + err.Error())
 	}
 
-	http.Handle("/", http.FileServer(http.FS(subFS)))
-	http.HandleFunc("/ws", websocketHandler)
+	router := http.NewServeMux()
+	router.Handle("/", http.FileServer(http.FS(subFS)))
+	router.HandleFunc("/ws", websocketHandler)
 
-	localListener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		panic(err)
+		communication.Fatal("Unable to start the local UI server: " + err.Error())
 	}
-	go http.Serve(localListener, nil)
-
-	ui, err := lorca.New(fmt.Sprintf("http://%s", localListener.Addr().String()), "", 980, 800, "--remote-allow-origins=http://127.0.0.1")
-	if err != nil {
-		communication.Fatal(fmt.Sprintf("Unable to run Chrome/Chromium: %s", err.Error()))
-	}
-	defer ui.Close()
-
-	<-ui.Done()
-}
-
-func findKeyByValue(m map[string]string, v string) (string, bool) {
-	for k, x := range m {
-		if x == v {
-			return k, true
+	server := &http.Server{Handler: router, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			communication.Fatal("Local UI server stopped: " + err.Error())
 		}
+	}()
+
+	url := fmt.Sprintf("http://%s", listener.Addr().String())
+	window, err := lorca.New(url, "", 980, 800,
+		"--remote-allow-origins="+url,
+		"--remote-allow-origins=http://127.0.0.1",
+		"--disable-features=Translate",
+		"--no-first-run",
+	)
+	if err != nil {
+		communication.Fatal("Unable to start Chrome/Chromium: " + err.Error())
 	}
-	return "", false
+	defer window.Close()
+
+	<-window.Done()
+	_ = server.Close()
 }

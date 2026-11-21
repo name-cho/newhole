@@ -5,6 +5,7 @@ import {
 } from "@giantmachines/redux-websocket";
 import { createReducer } from "@reduxjs/toolkit";
 import {
+  MessageTypeActiveTunnels,
   MessageTypeLoadingFailure,
   MessageTypeLoadingStart,
   MessageTypeLoadingSuccess,
@@ -77,6 +78,33 @@ export const tunnelsReducer = createReducer(initialState, {
           error: true,
           errorMsg: action.payload.message.error,
         };
+        break;
+      }
+      case MessageTypeActiveTunnels: {
+        const remembered: any[] = action.payload.message.activeTunnels || [];
+        state.tunnels = state.tunnels.filter((tunnel: Tunnel) =>
+          remembered.some((entry) => entry.tunnelId === tunnel.tunnelId)
+        );
+        remembered.forEach((entry) => {
+          const existing = state.tunnels.find(
+            (tunnel: Tunnel) => tunnel.tunnelId === entry.tunnelId
+          );
+          if (existing) return;
+          const payload = entry.payload || {};
+          const remote = payload.remote || {};
+          state.tunnels.push({
+            tunnelId: entry.tunnelId,
+            siteId: remote.siteId,
+            type: entry.mode,
+            started: false,
+            usingBasicAuth: !!remote.basicAuthUsername,
+            basicAuthUsername: remote.basicAuthUsername,
+            basicAuthPassword: remote.basicAuthPassword,
+            proxyErrorDisabled: !!remote.disableProxyErrorPage,
+            loading: true,
+            loadingMsg: "Restoring the tunnel...",
+          } as Tunnel);
+        });
         break;
       }
       case MessageTypeTunnelStop: {

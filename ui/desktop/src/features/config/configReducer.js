@@ -2,6 +2,7 @@ import { createReducer } from "@reduxjs/toolkit";
 import jwtDecode from "jwt-decode";
 import {
   MessageTypeAppStart,
+  MessageTypeHostnameHistory,
   MessageTypeLogin,
   MessageTypeLoginSuccess,
   MessageTypeLogoutSuccess,
@@ -24,6 +25,8 @@ export const configReducer = createReducer(
     version: "development",
     commitHash: "unknown",
     homeDirectory: "",
+    hostnames: [],
+    lastTunnel: null,
   },
   {
     "REDUX_WEBSOCKET::MESSAGE": (state, action) => {
@@ -41,6 +44,10 @@ export const configReducer = createReducer(
           : null;
 
         state.syncedWithBackend = true;
+      }
+      else if (action.payload.message.type === MessageTypeHostnameHistory) {
+        state.hostnames = action.payload.message.hostnames || [];
+        state.lastTunnel = action.payload.message.lastTunnel || null;
       }
       else if (action.payload.message.type === MessageTypeLogin)
         state.authInstructions = action.payload.message;

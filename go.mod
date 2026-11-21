@@ -1,4 +1,4 @@
-module github.com/loophole/cli
+module github.com/name-cho/newhole
 
 go 1.20
 

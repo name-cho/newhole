@@ -14,6 +14,10 @@ const (
 	MessageTypeAuthorization        MessageType = "MT_RequestLogin"
 	MessageTypeLogout               MessageType = "MT_RequestLogout"
 	MessageTypeOpenBrowser          MessageType = "MT_OpenInBrowser"
+	MessageTypePing                 MessageType = "MT_Ping"
+	MessageTypeRefreshHistory       MessageType = "MT_RequestHostnameHistory"
+	MessageTypeForgetHostname       MessageType = "MT_RequestHostnameForget"
+	MessageTypeActiveTunnels        MessageType = "MT_RequestActiveTunnels"
 )
 
 type Message struct {
@@ -27,4 +31,12 @@ type StopTunnelMessage struct {
 
 type OpenInBrowserMessage struct {
 	URL string `json:"url"`
+}
+
+type ForgetHostnameMessage struct {
+	Hostname string `json:"hostname"`
+}
+
+type pingMessage struct {
+	Type MessageType `json:"type"`
 }

@@ -24,7 +24,7 @@ const Sidebar = () => {
     <aside className="menu is-narrow-mobile is-fullheight">
       <figure className="image">
         <Link to="/">
-          <img src="/logo.png" alt="Loophole" />
+          <img src="/logo.png" alt="Newhole" />
         </Link>
       </figure>
       {auth.loggedIn ? <p className="menu-label">Tunnels</p> : null}

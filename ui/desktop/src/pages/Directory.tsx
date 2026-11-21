@@ -17,7 +17,7 @@ import {
   isBasicAuthPasswordValid,
   isBasicAuthUsernameValid,
   isLocalPathValid,
-  isLoopholeHostnameValid,
+  isNewholeHostnameValid,
 } from "../features/validator/validators";
 
 const DirectoryPage = () => {
@@ -34,7 +34,7 @@ const DirectoryPage = () => {
 
   const areInputsValid = (): boolean => {
     if (!isLocalPathValid(path)) return false;
-    if (usingCustomHostname && !isLoopholeHostnameValid(customHostname))
+    if (usingCustomHostname && !isNewholeHostnameValid(customHostname))
       return false;
     if (
       usingBasicAuth &&
@@ -78,7 +78,7 @@ const DirectoryPage = () => {
   return (
     <div className="container">
       <h1 className="subtitle is-4">
-        Exposes local directory to the public via loophole tunnel (download only
+        Exposes local directory to the public via Newhole tunnel (download only
         mode) available through HTTPS.
       </h1>
       <hr />

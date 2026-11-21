@@ -1,15 +1,18 @@
+//go:build !desktop
 // +build !desktop
 
 package cmd
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 
-	"github.com/loophole/cli/internal/app/loophole"
-	lm "github.com/loophole/cli/internal/app/loophole/models"
-	"github.com/loophole/cli/internal/pkg/communication"
-	"github.com/loophole/cli/internal/pkg/token"
-
+	"github.com/name-cho/newhole/internal/app/newhole"
+	lm "github.com/name-cho/newhole/internal/app/newhole/models"
+	"github.com/name-cho/newhole/internal/pkg/communication"
+	"github.com/name-cho/newhole/internal/pkg/token"
 	"github.com/spf13/cobra"
 )
 
@@ -17,37 +20,54 @@ var webdavEndpointSpecs lm.LocalDirectorySpecs
 
 var webdavCmd = &cobra.Command{
 	Use:   "webdav <path>",
-	Short: "Expose given directory to the public via WebDav",
-	Long: `Exposes local directory to the public via WebDav via loophole tunnel.
+	Short: "Expose a local directory over WebDAV",
+	Long: `Exposes a local directory over WebDAV (upload and download).
 
-This can then be even mounted on other machines in the Windows Explorer, macOS Finder, Linux Gnome Files or Linux KDE Konqueror etc.
+The share can be mounted from Windows Explorer, macOS Finder, GNOME Files or any
+WebDAV client using the WebDAV address printed on startup.
 
-To expose local directory via webdav (e.g. /data/my-data) simply use 'loophole webdav /data/my-data'.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		loggedIn := token.IsTokenSaved()
-		idToken := token.GetIdToken()
-		communication.ApplicationStart(loggedIn, idToken)
+  newhole webdav ./files`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		prepareRemote(0)
+		remoteEndpointSpecs.ExposeMode = "webdav"
 
+		directory, err := filepath.Abs(args[0])
+		if err != nil {
+			return fmt.Errorf("unable to resolve %q: %w", args[0], err)
+		}
+		info, err := os.Stat(directory)
+		if err != nil {
+			return fmt.Errorf("unable to read %q: %w", args[0], err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%q is not a directory", args[0])
+		}
+		webdavEndpointSpecs.Path = directory
+
+		communication.ApplicationStart(token.IsTokenSaved(), token.GetIdToken())
 		checkVersion()
-
-		webdavEndpointSpecs.Path = args[0]
-		quitChannel := make(chan bool)
 
 		exposeConfig := lm.ExposeWebdavConfig{
 			Local:  webdavEndpointSpecs,
 			Remote: remoteEndpointSpecs,
 		}
 
-		authMethod, err := loophole.RegisterTunnel(&exposeConfig.Remote)
+		authMethod, err := newhole.RegisterTunnel(&exposeConfig.Remote)
 		if err != nil {
-			communication.Fatal(err.Error())
+			return err
 		}
 
-		loophole.ForwardDirectoryViaWebdav(exposeConfig, authMethod, quitChannel)
+		return newhole.ForwardDirectoryViaWebdav(exposeConfig, authMethod, quitChannel())
+	},
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		if daemonRequested(cmd, args) {
+			return respawnAsDaemon(cmd, args)
+		}
+		return nil
 	},
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
-			return errors.New("Missing argument: path")
+			return errors.New("missing argument: path")
 		}
 		return nil
 	},
@@ -58,6 +78,5 @@ To expose local directory via webdav (e.g. /data/my-data) simply use 'loophole w
 
 func init() {
 	initServeCommand(webdavCmd)
-
 	rootCmd.AddCommand(webdavCmd)
 }

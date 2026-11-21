@@ -3,7 +3,7 @@ const validIpAddressRegex =
 const validHostnameRegex =
   "^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]).)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$";
 
-export const isLoopholeHostnameValid = (hostname: string): boolean => {
+export const isNewholeHostnameValid = (hostname: string): boolean => {
   return (
     hostname.match(/^[a-z](?:-?[a-z0-9])*$/) !== null &&
     hostname.length > 1 &&

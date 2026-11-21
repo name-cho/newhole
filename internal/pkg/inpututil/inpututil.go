@@ -3,15 +3,17 @@ package inpututil
 import (
 	"os"
 
-	"github.com/loophole/cli/internal/pkg/communication"
+	"golang.org/x/term"
 )
 
-//IsUsingPipe returns whether a pipe is being used for inputs or not
 func IsUsingPipe() bool {
-	stdinInfo, err := os.Stdin.Stat()
+	info, err := os.Stdin.Stat()
 	if err != nil {
-		communication.Warn("Error getting terminal info")
-		communication.Fatal(err.Error())
+		return true
 	}
-	return (stdinInfo.Mode() & os.ModeCharDevice) == 0
+	return (info.Mode() & os.ModeCharDevice) == 0
+}
+
+func IsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }

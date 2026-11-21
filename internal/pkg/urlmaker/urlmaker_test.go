@@ -2,74 +2,31 @@ package urlmaker
 
 import "testing"
 
-func TestReturnsCorrectHttpsUrl(t *testing.T) {
-	expectedSiteID := "https://some-site.loophole.site"
-	result := GetSiteURL("https", "some-site", "loophole.site")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site URL '%s' is different than expected: %s", result, expectedSiteID)
+func TestGetSiteURLCases(t *testing.T) {
+	cases := []struct {
+		protocol string
+		siteID   string
+		domain   string
+		expected string
+	}{
+		{"https", "some-site", "loophole.site", "https://some-site.loophole.site"},
+		{"https", "some-site", "loophole.host", "https://some-site.loophole.host"},
+		{"webdav", "some-site", "loophole.site", "webdav://some-site.loophole.site"},
+		{"davs", "some-site", "loophole.host", "davs://some-site.loophole.host"},
+		{"https", "MixedCase", "loophole.site", "https://mixedcase.loophole.site"},
+	}
+	for _, testCase := range cases {
+		if got := GetSiteURL(testCase.protocol, testCase.siteID, testCase.domain); got != testCase.expected {
+			t.Fatalf("URL %q differs from expected %q", got, testCase.expected)
+		}
 	}
 }
 
-func TestReturnsCorrectHttpsUrlDifferentDomain(t *testing.T) {
-	expectedSiteID := "https://some-site.loophole.host"
-	result := GetSiteURL("https", "some-site", "loophole.host")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site URL '%s' is different than expected: %s", result, expectedSiteID)
+func TestGetSiteFQDNCases(t *testing.T) {
+	if got := GetSiteFQDN("some-site", "loophole.site"); got != "some-site.loophole.site" {
+		t.Fatalf("FQDN %q differs from expected", got)
 	}
-}
-
-func TestReturnsCorrectWebdavUrl(t *testing.T) {
-	expectedSiteID := "webdav://some-site.loophole.site"
-	result := GetSiteURL("webdav", "some-site", "loophole.site")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site URL '%s' is different than expected: %s", result, expectedSiteID)
-	}
-}
-
-func TestReturnsCorrectWebdavUrlDifferentDomain(t *testing.T) {
-	expectedSiteID := "webdav://some-site.loophole.host"
-	result := GetSiteURL("webdav", "some-site", "loophole.host")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site URL '%s' is different than expected: %s", result, expectedSiteID)
-	}
-}
-
-func TestReturnsCorrectDavsUrl(t *testing.T) {
-	expectedSiteID := "davs://some-site.loophole.site"
-	result := GetSiteURL("davs", "some-site", "loophole.site")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site URL '%s' is different than expected: %s", result, expectedSiteID)
-	}
-}
-
-func TestReturnsCorrectDavsUrlDifferentDomain(t *testing.T) {
-	expectedSiteID := "davs://some-site.loophole.host"
-	result := GetSiteURL("davs", "some-site", "loophole.host")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site URL '%s' is different than expected: %s", result, expectedSiteID)
-	}
-}
-
-func TestReturnsCorrectFQDN(t *testing.T) {
-	expectedSiteID := "some-site.loophole.site"
-	result := GetSiteFQDN("some-site", "loophole.site")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site FQDN '%s' is different than expected: %s", result, expectedSiteID)
-	}
-}
-
-func TestReturnsCorrectFQDNDifferentDomain(t *testing.T) {
-	expectedSiteID := "some-site.loophole.host"
-	result := GetSiteFQDN("some-site", "loophole.host")
-
-	if result != expectedSiteID {
-		t.Fatalf("Site FQDN '%s' is different than expected: %s", result, expectedSiteID)
+	if got := GetSiteFQDN("some-site", ""); got != "some-site" {
+		t.Fatalf("FQDN %q differs from expected", got)
 	}
 }

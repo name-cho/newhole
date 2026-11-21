@@ -1,3 +1,4 @@
+//go:build !desktop
 // +build !desktop
 
 package cmd
@@ -5,59 +6,64 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"strconv"
+	"strings"
 
-	"github.com/loophole/cli/internal/app/loophole"
-	lm "github.com/loophole/cli/internal/app/loophole/models"
-	"github.com/loophole/cli/internal/pkg/communication"
-	"github.com/loophole/cli/internal/pkg/token"
-
+	"github.com/name-cho/newhole/config"
+	"github.com/name-cho/newhole/internal/app/newhole"
+	lm "github.com/name-cho/newhole/internal/app/newhole/models"
+	"github.com/name-cho/newhole/internal/pkg/communication"
+	"github.com/name-cho/newhole/internal/pkg/token"
 	"github.com/spf13/cobra"
 )
 
 var localEndpointSpecs lm.LocalHTTPEndpointSpecs
 
 var httpCmd = &cobra.Command{
-	Use:   "http <port> [host]",
-	Short: "Expose http server on given port to the public",
-	Long: `Exposes http server running locally, or on locally available machine to the public via loophole tunnel.
+	Use:   "http <port|host:port|socket> [host]",
+	Short: "Expose an HTTP server running locally",
+	Long: `Exposes an HTTP server running locally, or on a machine reachable from this host.
 
-To expose server running locally on port 3000 simply use 'loophole http 3000'.
-To expose port running on some local host e.g. 192.168.1.20 use 'loophole http <port> 192.168.1.20'`,
-	Run: func(cmd *cobra.Command, args []string) {
-		loggedIn := token.IsTokenSaved()
-		idToken := token.GetIdToken()
-		communication.ApplicationStart(loggedIn, idToken)
+  newhole http 3000
+  newhole http 3000 192.168.1.20
+  newhole http unix:/var/run/app.sock`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return errors.New("missing argument: port")
+		}
+
+		prepareRemote(0)
+		remoteEndpointSpecs.ExposeMode = "http"
+		if err := resolveLocalTarget(args); err != nil {
+			return err
+		}
+		if err := lm.Validate(&localEndpointSpecs); err != nil {
+			return err
+		}
+		communication.ApplicationStart(token.IsTokenSaved(), token.GetIdToken())
 
 		checkVersion()
-
-		localEndpointSpecs.Host = "127.0.0.1"
-		if len(args) > 1 {
-			localEndpointSpecs.Host = args[1]
-		}
-		port, _ := strconv.ParseInt(args[0], 10, 32)
-		localEndpointSpecs.Port = int32(port)
-		quitChannel := make(chan bool)
 
 		exposeConfig := lm.ExposeHTTPConfig{
 			Local:  localEndpointSpecs,
 			Remote: remoteEndpointSpecs,
 		}
 
-		authMethod, err := loophole.RegisterTunnel(&exposeConfig.Remote)
+		authMethod, err := newhole.RegisterTunnel(&exposeConfig.Remote)
 		if err != nil {
-			communication.Fatal(err.Error())
+			return err
 		}
 
-		loophole.ForwardPort(exposeConfig, authMethod, quitChannel)
+		return newhole.ForwardPort(exposeConfig, authMethod, quitChannel())
+	},
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		if daemonRequested(cmd, args) {
+			return respawnAsDaemon(cmd, args)
+		}
+		return nil
 	},
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
-			return errors.New("Missing argument: port")
-		}
-		_, err := strconv.ParseInt(args[0], 10, 32)
-		if err != nil {
-			return fmt.Errorf("Invalid argument: port: %v", err)
+			return errors.New("missing argument: port")
 		}
 		return nil
 	},
@@ -66,11 +72,50 @@ To expose port running on some local host e.g. 192.168.1.20 use 'loophole http <
 	},
 }
 
+func resolveLocalTarget(args []string) error {
+	target := args[0]
+	switch {
+	case strings.HasPrefix(target, "unix:"):
+		localEndpointSpecs.UnixSocket = strings.TrimPrefix(target, "unix:")
+		return nil
+	case strings.Contains(target, "/") && !strings.Contains(target, ":"):
+		localEndpointSpecs.UnixSocket = target
+		return nil
+	case strings.Contains(target, "://"):
+		return fmt.Errorf("use `newhole http <port>`; %q looks like a URL", target)
+	case strings.Count(target, ":") == 1 && !strings.HasPrefix(target, "["):
+		parts := strings.SplitN(target, ":", 2)
+		port, err := parsePort(parts[1])
+		if err != nil {
+			return err
+		}
+		localEndpointSpecs.Host = parts[0]
+		localEndpointSpecs.Port = port
+	default:
+		port, err := parsePort(target)
+		if err != nil {
+			return err
+		}
+		localEndpointSpecs.Port = port
+		localEndpointSpecs.Host = "127.0.0.1"
+	}
+
+	if len(args) > 1 {
+		if localEndpointSpecs.UnixSocket != "" {
+			return errors.New("a unix socket target does not accept a host argument")
+		}
+		localEndpointSpecs.Host = args[1]
+	}
+	if localEndpointSpecs.Host == "" {
+		localEndpointSpecs.Host = "127.0.0.1"
+	}
+	return nil
+}
+
 func init() {
 	initServeCommand(httpCmd)
-	httpCmd.Flags().BoolVar(&localEndpointSpecs.HTTPS, "https", false, "use if your server is already using HTTPS")
-	httpCmd.Flags().BoolVar(&remoteEndpointSpecs.DisableProxyErrorPage, "disable-proxy-error-page", false, "disable proxy error page and return 502 when your server is not available")
-	httpCmd.Flags().StringVar(&localEndpointSpecs.Path, "path", "", "specify path you wish to expose")
-
+	httpCmd.Flags().BoolVar(&localEndpointSpecs.HTTPS, "https", false, "the local server speaks HTTPS")
+	httpCmd.Flags().StringVar(&localEndpointSpecs.Path, "path", "", "path to expose on the local server")
+	httpCmd.Flags().StringVar(&config.Config.TLS.ServerName, "tls-server-name", config.Config.TLS.ServerName, "server name to verify when the upstream uses TLS")
 	rootCmd.AddCommand(httpCmd)
 }

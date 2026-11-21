@@ -3,38 +3,102 @@ package cache
 import (
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 
-	"github.com/loophole/cli/internal/pkg/communication"
 	"github.com/mitchellh/go-homedir"
 )
 
-// GetLocalStorageDir returns local directory for loophole cache purposes
-func GetLocalStorageDir(directoryName string) string {
-	home, err := homedir.Dir()
-	if err != nil {
-		communication.Fatal(fmt.Sprintf("Error reading user home directory: %s", err.Error()))
-	}
+const storageDirectoryName = ".newhole"
+const legacyStorageDirectoryName = ".loophole"
 
-	dirName := path.Join(home, ".loophole", directoryName)
-	err = os.MkdirAll(dirName, os.ModePerm)
-	if err != nil {
-		communication.Fatal(fmt.Sprintf("Error creating local cache directory: %s", err.Error()))
+func homeDirectory() (string, error) {
+	home, err := homedir.Dir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("unable to determine home directory: %w", err)
 	}
-	return dirName
+	return home, nil
 }
 
-// GetLocalStorageFile returns local file for loophole cache purposes
-func GetLocalStorageFile(fileName string, directoryName string) string {
-	home, err := homedir.Dir()
-	if err != nil {
-		communication.Fatal(fmt.Sprintf("Error reading user home directory: %s", err.Error()))
+func storageRoot() (string, error) {
+	custom := os.Getenv("NEWHOLE_HOME")
+	if custom == "" {
+		custom = os.Getenv("LOOPHOLE_HOME")
 	}
-	dirName := path.Join(home, ".loophole", directoryName)
-	err = os.MkdirAll(dirName, os.ModePerm)
-	if err != nil {
-		communication.Fatal(fmt.Sprintf("Error creating local cache directory: %s", err.Error()))
+	if custom != "" {
+		return custom, nil
 	}
+	home, err := homeDirectory()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, storageDirectoryName), nil
+}
 
-	return path.Join(dirName, fileName)
+func migrateLegacyStorage(root string) {
+	if _, err := os.Stat(root); err == nil {
+		return
+	}
+	home, err := homeDirectory()
+	if err != nil {
+		return
+	}
+	legacy := filepath.Join(home, legacyStorageDirectoryName)
+	if info, err := os.Stat(legacy); err != nil || !info.IsDir() {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(root), 0o700)
+	if err := os.Rename(legacy, root); err == nil {
+		return
+	}
+	if err := copyTree(legacy, root); err != nil {
+		return
+	}
+}
+
+func copyTree(source string, target string) error {
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return nil
+		}
+		destination := filepath.Join(target, relative)
+		if info.IsDir() {
+			return os.MkdirAll(destination, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		return os.WriteFile(destination, data, info.Mode().Perm())
+	})
+}
+
+func GetLocalStorageDir(directoryName string) string {
+	root, err := storageRoot()
+	if err != nil {
+		panic(err)
+	}
+	migrateLegacyStorage(root)
+	directory := filepath.Join(root, directoryName)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		panic(fmt.Errorf("unable to create storage directory %s: %w", directory, err))
+	}
+	return directory
+}
+
+func GetLocalStorageFile(fileName string, directoryName string) string {
+	directory := GetLocalStorageDir(directoryName)
+	return filepath.Join(directory, fileName)
+}
+
+func StorageRoot() (string, error) {
+	root, err := storageRoot()
+	if err != nil {
+		return "", err
+	}
+	migrateLegacyStorage(root)
+	return root, nil
 }

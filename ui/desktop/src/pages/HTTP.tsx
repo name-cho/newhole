@@ -3,7 +3,7 @@ import React, { FormEvent, useState } from "react";
 import HostnameSettings from "../components/form/HostnameSettings";
 import BasicAuthSettings from "../components/form/BasicAuthSettings";
 import LocalWebserverSettings from "../components/form/LocalWebserverSettings";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { v4 as uuidv4 } from "uuid";
 
 import { send } from "@giantmachines/redux-websocket";
@@ -18,12 +18,13 @@ import {
   isBasicAuthUsernameValid,
   isLocalHostValid,
   isLocalPortValid,
-  isLoopholeHostnameValid,
+  isNewholeHostnameValid,
 } from "../features/validator/validators";
 
 const HTTP = () => {
   const dispatch = useDispatch();
   const history = useHistory();
+  const lastTunnel = useSelector((state: any) => state.config.lastTunnel);
   const [port, setPort] = useState("8080");
   const [hostname, setHostname] = useState("127.0.0.1");
   const [isHTTPS, setIsHTTPS] = useState(false);
@@ -41,7 +42,7 @@ const HTTP = () => {
     if (!isLocalHostValid(hostname)) return false;
     if (!isLocalPortValid(parseInt(port, 10))) return false;
     if (parseInt(port, 10) <= 0) return false;
-    if (usingCustomHostname && !isLoopholeHostnameValid(customHostname))
+    if (usingCustomHostname && !isNewholeHostnameValid(customHostname))
       return false;
     if (
       usingBasicAuth &&
@@ -93,9 +94,30 @@ const HTTP = () => {
     <div className="container">
       <h1 className="subtitle is-4">
         Exposes http server running locally, or on locally available machine to
-        the public via loophole tunnel.
+        the public via Newhole tunnel.
       </h1>
       <hr />
+      {lastTunnel && lastTunnel.mode === "http" ? (
+        <div className="notification is-light">
+          <p>
+            The last tunnel exposed {lastTunnel.target} on{" "}
+            {lastTunnel.hostname || "a random hostname"}.
+          </p>
+          <button
+            className="button is-small is-primary is-light"
+            type="button"
+            onClick={() => {
+              setPort(lastTunnel.target);
+              if (lastTunnel.hostname) {
+                setUsingCustomHostname(true);
+                setCustomHostname(lastTunnel.hostname);
+              }
+            }}
+          >
+            Reuse these settings
+          </button>
+        </div>
+      ) : null}
       <div className="context-box">
         <form onSubmit={startTunnel}>
           <div className="columns is-multiline">

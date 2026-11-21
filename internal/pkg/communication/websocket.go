@@ -1,3 +1,4 @@
+//go:build desktop
 // +build desktop
 
 package communication
@@ -6,11 +7,12 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-	"github.com/loophole/cli/config"
-	coreModels "github.com/loophole/cli/internal/app/loophole/models"
-	authModels "github.com/loophole/cli/internal/pkg/token/models"
-	"github.com/loophole/cli/internal/pkg/urlmaker"
 	"github.com/mitchellh/go-homedir"
+	"github.com/name-cho/newhole/config"
+	coreModels "github.com/name-cho/newhole/internal/app/newhole/models"
+	"github.com/name-cho/newhole/internal/pkg/state"
+	authModels "github.com/name-cho/newhole/internal/pkg/token/models"
+	"github.com/name-cho/newhole/internal/pkg/urlmaker"
 	"github.com/ncruces/zenity"
 )
 
@@ -24,6 +26,8 @@ const (
 	MessageTypeTunnelLog MessageType = "MT_TunnelLog"
 
 	MessageTypeAppStart            MessageType = "MT_ApplicationStart"
+	MessageTypeHostnameHistory     MessageType = "MT_HostnameHistory"
+	MessageTypeActiveTunnels       MessageType = "MT_ActiveTunnels"
 	MessageTypeAppStop             MessageType = "MT_ApplicationStop"
 	MessageTypeNewVersionAvailable MessageType = "MT_ApplicationNewVersionAvailable"
 
@@ -83,6 +87,17 @@ type appStartMessage struct {
 	CommitHash    string               `json:"commitHash"`
 }
 
+type hostnameHistoryMessage struct {
+	Type       MessageType            `json:"type"`
+	Hostnames  []state.HostnameRecord `json:"hostnames"`
+	LastTunnel *state.LastTunnel      `json:"lastTunnel"`
+}
+
+type activeTunnelsMessage struct {
+	Type    MessageType          `json:"type"`
+	Tunnels []state.ActiveTunnel `json:"activeTunnels"`
+}
+
 type appStopMessage struct {
 	Type MessageType `json:"type"`
 }
@@ -107,7 +122,7 @@ type loginSuccessMessage struct {
 
 type loginFailureMessage struct {
 	Type  MessageType `json:"type"`
-	Error string      `json:errror"`
+	Error string      `json:"error"`
 }
 
 type logoutSuccessMessage struct {
@@ -116,7 +131,7 @@ type logoutSuccessMessage struct {
 
 type logoutFailureMessage struct {
 	Type  MessageType `json:"type"`
-	Error string      `json:errror"`
+	Error string      `json:"error"`
 }
 
 type tunnelStartMessage struct {
@@ -162,9 +177,8 @@ func (l *websocketLogger) write(websocketMessage interface{}) {
 	l.messageMutex.Lock()
 	defer l.messageMutex.Unlock()
 
-	err := l.wsClient.WriteJSON(websocketMessage)
-	if err != nil {
-		defaultLogger.Fatal("Communication over websocket is failing")
+	if err := l.wsClient.WriteJSON(websocketMessage); err != nil {
+		defaultLogger.Debug("Communication over websocket is failing: " + err.Error())
 	}
 }
 
@@ -242,8 +256,16 @@ func (l *websocketLogger) Fatal(message string) {
 		Class:   "danger",
 	})
 
-	zenity.Error(message)
-	defaultLogger.Fatal(message)
+	if _, err := zenity.Error(message); err != nil {
+		defaultLogger.Debug("unable to show a dialog: " + err.Error())
+	}
+	defaultLogger.Error(message)
+}
+
+func (l *websocketLogger) Exit(code int) {
+	l.messageMutex.Lock()
+	defer l.messageMutex.Unlock()
+	l.wsClient.Close()
 }
 
 func (l *websocketLogger) ApplicationStart(loggedIn bool, idToken string) {
@@ -264,6 +286,21 @@ func (l *websocketLogger) ApplicationStart(loggedIn bool, idToken string) {
 
 	l.write(websocketMessage)
 }
+func (l *websocketLogger) HostnameHistory() {
+	l.write(hostnameHistoryMessage{
+		Type:       MessageTypeHostnameHistory,
+		Hostnames:  state.Hostnames(),
+		LastTunnel: state.LastTunnelSettings(),
+	})
+}
+
+func (l *websocketLogger) ActiveTunnels() {
+	l.write(activeTunnelsMessage{
+		Type:    MessageTypeActiveTunnels,
+		Tunnels: state.ActiveTunnels(),
+	})
+}
+
 func (l *websocketLogger) ApplicationStop() {
 	l.write(appStopMessage{
 		Type: MessageTypeAppStop,
@@ -384,7 +421,7 @@ func (l *websocketLogger) LoadingFailureWithRequest(tunnelID string, err error) 
 
 func (l *websocketLogger) NewVersionAvailable(availableVersion string) {
 	l.write(appNewVersionMessage{
-		Type:    MessageTypeLoadingFailure,
+		Type:    MessageTypeNewVersionAvailable,
 		Version: availableVersion,
 	})
 }

@@ -1,14 +1,28 @@
 # Binaries
-/cli
+/newhole
+/newhole-desktop
 /loophole
 /loophole-desktop
 /dist
+
 # Certs cache dir
 /certs
+
 # Vendor packages
 /vendor
+
 # Node.js files
 node_modules
 .eslintcache
+
+# Desktop bundle produced by the build
+/ui/desktop/build/*
+!/ui/desktop/build/index.html
+!/ui/desktop/build/.gitignore
+
 # Editor files
 .vscode
+.idea
+
+# Local environment
+.env

@@ -26,7 +26,7 @@ const App = () => {
   return (
     <AuthProvider>
       <Router>
-        <Layout title="Loophole" description="Instant hosting, right from your local machine">
+        <Layout title="Newhole" description="Instant hosting, right from your local machine">
           <Switch>
             <Route exact path="/">
               <Redirect to="/tunnels" />

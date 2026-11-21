@@ -1,4 +1,4 @@
-import { configureStore, getDefaultMiddleware } from "@reduxjs/toolkit";
+import { configureStore, Middleware } from "@reduxjs/toolkit";
 import reduxLogger from "redux-logger";
 import reduxWebsocket from "@giantmachines/redux-websocket";
 import logsReducer from "../features/logs/logsReducer";
@@ -13,14 +13,20 @@ const reducers = {
 
 const store = configureStore({
   reducer: reducers,
-  middleware: [
-    ...getDefaultMiddleware(),
-    reduxLogger,
-    reduxWebsocket({
-      serializer: JSON.stringify,
-      deserializer: JSON.parse,
-    }),
-  ],
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware({
+      serializableCheck: false,
+      immutableCheck: false,
+    }).concat(
+      reduxLogger as unknown as Middleware,
+      reduxWebsocket({
+        serializer: JSON.stringify,
+        deserializer: JSON.parse,
+      }) as unknown as Middleware
+    ),
 });
+
+export type RootState = ReturnType<typeof store.getState>;
+export type AppDispatch = typeof store.dispatch;
 
 export default store;

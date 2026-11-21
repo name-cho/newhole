@@ -1,13 +1,16 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+Newhole is a client for the Loophole tunnel service and talks to the Loophole API and SSH
+gateway. Please report vulnerabilities privately through GitHub security advisories instead
+of public issues.
 
-We are currently in active beta so we update to newest packages with each commit.
+## Hardening
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.x.x   | :white_check_mark: |
-
-## Reporting a Vulnerability
-
-Please open confidential issue with any security-relevant topic you have.
+* Credentials live in `~/.newhole` with `0600` file permissions.
+* TLS verification is enabled by default; `--insecure` only affects the API connection and is
+  printed as a warning on startup.
+* SSH host keys are not verified by default because the service rotates gateways. Use
+  `--host-key-policy known_hosts` together with `NEWHOLE_KNOWN_HOSTS` to enable strict
+  verification.
+* Client supplied `X-Forwarded-For` and `Forwarded` headers are always scrubbed, so the local
+  service sees the real client address.
